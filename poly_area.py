@@ -4,6 +4,8 @@ from itertools import islice, izip, imap, chain
 import logging
 import ctypes
 import numpy
+import timeit
+import time
 
 from multiprocessing import sharedctypes
 
@@ -38,7 +40,7 @@ def area(points):
     return abs(acc) / 2
 
 
-def area_gen(points):
+def area_iter(points):
     # area of an irregular polygon is calculated as follows:
     # 1) take the product of the current cord of x and the next cord of y
     # 2) take the product of the current cord of y and the next cord of x
@@ -53,8 +55,6 @@ def area_gen(points):
         (curr_point[0] * next_point[1]) - (curr_point[1] * next_point[0])
         for curr_point, next_point in izip(points, islice(points, 1, None))
     )) / 2
-
-assert area_gen(diag_gen(32)) == 64.0
 
 
 # noinspection PyNoneFunctionAssignment
@@ -80,6 +80,11 @@ try:
     ]
     poly_area_so.area_of_irregular_polygon_from_cords_sse_float.restype = ctypes.c_float
 
+    poly_area_so.area_of_irregular_polygon_from_cords_avx_float.argtypes = [
+        ctypes.POINTER(ctypes.c_float), ctypes.c_ulong
+    ]
+    poly_area_so.area_of_irregular_polygon_from_cords_avx_float.restype = ctypes.c_float
+
     poly_area_so.area_of_irregular_polygon_from_cords_double.argtypes = [
         ctypes.POINTER(ctypes.c_double), ctypes.c_ulong
     ]
@@ -97,19 +102,67 @@ try:
             len(points)
         )
 
+    def area_float_c_avx(points):
+        aligned_mem_block = numpy_allocate_aligned_shared_mem_block((len(points), 2), 'float32', 32)
+        aligned_mem_block[:] = points
+        return poly_area_so.area_of_irregular_polygon_from_cords_avx_float(
+            aligned_mem_block.ctypes.data_as(ctypes.POINTER(ctypes.c_float), len(points))
+        )
+
     def area_double_c(points):
         cords_ptr = numpy.asarray(points, dtype='float64').ravel().ctypes.data_as(ctypes.POINTER(ctypes.c_double))
         return poly_area_so.area_of_irregular_polygon_from_cords_double(cords_ptr, len(points))
 
-    if area_double_c(diag_gen(32)) != 64:
-        raise ValueError('Expected 64 got {0}'.format(area_double_c(diag_gen(32))))
-    if area_float_c(diag_gen(32)) != 64:
-        raise ValueError('Expected 64 got {0}'.format(area_float_c(diag_gen(32))))
-    if area_float_c_sse(diag_gen(32)) != 64:
-        raise ValueError('Expected 64 got {0}'.format(area_float_c_sse(diag_gen(32))))
+    # if area_double_c(diag_gen(32)) != 64:
+    #     raise ValueError('Expected 64 got {0}'.format(area_double_c(diag_gen(32))))
+    # if area_float_c(diag_gen(32)) != 64:
+    #     raise ValueError('Expected 64 got {0}'.format(area_float_c(diag_gen(32))))
+    # if area_float_c_sse(diag_gen(32)) != 64:
+    #     raise ValueError('Expected 64 got {0}'.format(area_float_c_sse(diag_gen(32))))
 
 except OSError as _:
     logging.warning('Failed to load shared object msg: {0}'.format(_))
+
+if __name__ == '__main__':
+    polygon = diag_gen(2*10**5)
+    aligned_mem_block_float = numpy_allocate_aligned_shared_mem_block((len(polygon), 2), 'float32', 16)
+    aligned_mem_block_float[:] = polygon
+    polygon_cfloats = aligned_mem_block_float.ctypes.data_as(ctypes.POINTER(ctypes.c_float))
+    aligned_mem_block_double = numpy_allocate_aligned_shared_mem_block((len(polygon), 2), 'float64', 16)
+    aligned_mem_block_double[:] = polygon
+    polygon_cdoubles = aligned_mem_block_double.ctypes.data_as(ctypes.POINTER(ctypes.c_double))
+
+    implementations = (area, polygon), \
+                      (area_iter, polygon), \
+                      (area_float_c, aligned_mem_block_float), \
+                      (area_float_c_sse, aligned_mem_block_float)
+
+    for impl in area, area_iter:
+        start = time.time()
+        _ = impl(polygon)
+        end = time.time()
+        print '{0}_py: {1}s'.format(impl.__name__, (end - start))
+
+    start = time.time()
+    _ = poly_area_so.area_of_irregular_polygon_from_cords_double(polygon_cdoubles, len(polygon))
+    end = time.time()
+    print '{0}: {1}s'.format('area_c_double', (end - start))
+
+    start = time.time()
+    _ = poly_area_so.area_of_irregular_polygon_from_cords_float(polygon_cfloats, len(polygon))
+    end = time.time()
+    print '{0}: {1}s'.format('area_c_float', (end - start))
+
+    start = time.time()
+    _ = poly_area_so.area_of_irregular_polygon_from_cords_sse_float(polygon_cfloats, len(polygon))
+    end = time.time()
+    print '{0}: {1}s'.format('area_c_float_sse', (end - start))
+
+    start = time.time()
+    _ = poly_area_so.area_of_irregular_polygon_from_cords_avx_float(polygon_cfloats, len(polygon))
+    end = time.time()
+    print '{0}: {1}s'.format('area_c_float_sse', (end - start))
+
 
 
 

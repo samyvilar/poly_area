@@ -1,6 +1,6 @@
 
 
-CFLAGS=-Wall -Wfatal-errors -Ofast -mtune=native -march=native -mavx
+CFLAGS=-Wall -Wfatal-errors -Ofast -mtune=native -march=native
 CC=gcc
 
 

@@ -140,6 +140,7 @@ float area_of_irregular_polygon_from_cords_sse_float(float cords[][2], unsigned 
     return scalar_half(scalar_abs(accum_sum_aux));
 }
 
+#ifdef __AVX__
 float area_of_irregular_polygon_from_cords_avx_float(float cords[][2], unsigned long cords_len) {
     if (__builtin_expect(is_null(cords) || cords_len == 0, 0))
         return 0;
@@ -182,6 +183,12 @@ int main() {
 
     return 0;
 }
+#else
+float area_of_irregular_polygon_from_cords_avx_float(float cords[][2], unsigned long cords_len) {
+    printf("NO AVX SUPPORT!\n");
+    exit(-1);
+}
+#endif
 
 
 
