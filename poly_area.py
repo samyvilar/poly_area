@@ -161,7 +161,7 @@ if __name__ == '__main__':
     start = time.time()
     _ = poly_area_so.area_of_irregular_polygon_from_cords_avx_float(polygon_cfloats, len(polygon))
     end = time.time()
-    print '{0}: {1}s'.format('area_c_float_sse', (end - start))
+    print '{0}: {1}s'.format('area_c_float_avx', (end - start))
 
 
 
