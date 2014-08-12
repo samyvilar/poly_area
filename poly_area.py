@@ -5,6 +5,8 @@ import logging
 import ctypes
 import numpy
 
+from multiprocessing import sharedctypes
+
 
 def diag_gen(length):  # 1 loops, best of 3: 543 ms per loop
     points = [(0.25, 0.25)]
@@ -55,23 +57,45 @@ def area_gen(points):
 assert area_gen(diag_gen(32)) == 64.0
 
 
+# noinspection PyNoneFunctionAssignment
+def numpy_allocate_aligned_shared_mem_block(shape_or_count, dtype, alignment_bytes, segment_count=1):
+    count = numpy.product(shape_or_count)
+    item_size = numpy.dtype(dtype).itemsize
+    # Add alignment bytes for better SSE performance ...
+    size_in_bytes = ((item_size * count) + (segment_count * alignment_bytes))  # add a couple bytes for alignment ...
+    raw_array = sharedctypes.RawArray('b', size_in_bytes)
+    _buf = numpy.frombuffer(raw_array, dtype='b')
+    start_index = -_buf.ctypes.data % alignment_bytes
+    # get numpy array aligned ...
+    return _buf[start_index:start_index + count*item_size].view(dtype).reshape(shape_or_count)
+
+
 try:
     poly_area_so = ctypes.CDLL('libpoly_area.so')
-    poly_area_so.area_of_irregular_polygon_from_cords_float.argtypes = [
-        ctypes.POINTER(ctypes.c_float),
-        ctypes.c_ulong
-    ]
+    poly_area_so.area_of_irregular_polygon_from_cords_float.argtypes = [ctypes.POINTER(ctypes.c_float), ctypes.c_ulong]
     poly_area_so.area_of_irregular_polygon_from_cords_float.restype = ctypes.c_float
 
+    poly_area_so.area_of_irregular_polygon_from_cords_sse_float.argtypes = [
+        ctypes.POINTER(ctypes.c_float), ctypes.c_ulong
+    ]
+    poly_area_so.area_of_irregular_polygon_from_cords_sse_float.restype = ctypes.c_float
+
     poly_area_so.area_of_irregular_polygon_from_cords_double.argtypes = [
-        ctypes.POINTER(ctypes.c_double),
-        ctypes.c_ulong
+        ctypes.POINTER(ctypes.c_double), ctypes.c_ulong
     ]
     poly_area_so.area_of_irregular_polygon_from_cords_double.restype = ctypes.c_double
 
     def area_float_c(points):
         cords_ptr = numpy.asarray(points, dtype='float32').ravel().ctypes.data_as(ctypes.POINTER(ctypes.c_float))
         return poly_area_so.area_of_irregular_polygon_from_cords_float(cords_ptr, len(points))
+
+    def area_float_c_sse(points):
+        aligned_mem_block = numpy_allocate_aligned_shared_mem_block((len(points), 2), 'float32', 16)
+        aligned_mem_block[:] = points
+        return poly_area_so.area_of_irregular_polygon_from_cords_sse_float(
+            aligned_mem_block.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
+            len(points)
+        )
 
     def area_double_c(points):
         cords_ptr = numpy.asarray(points, dtype='float64').ravel().ctypes.data_as(ctypes.POINTER(ctypes.c_double))
@@ -81,6 +105,8 @@ try:
         raise ValueError('Expected 64 got {0}'.format(area_double_c(diag_gen(32))))
     if area_float_c(diag_gen(32)) != 64:
         raise ValueError('Expected 64 got {0}'.format(area_float_c(diag_gen(32))))
+    if area_float_c_sse(diag_gen(32)) != 64:
+        raise ValueError('Expected 64 got {0}'.format(area_float_c_sse(diag_gen(32))))
 
 except OSError as _:
     logging.warning('Failed to load shared object msg: {0}'.format(_))
