@@ -141,11 +141,11 @@ except OSError as _:
 
 
 def mac_avx_supported():
-    return ' AVX ' in subprocess.check_output(('sysctl', '-a', 'machdep.cpu.features'))
+    return ' AVX1.0 ' in subprocess.check_output(('sysctl', '-a', 'machdep.cpu.features'))
 
 
 def linux_avx_supported():
-    return ' AVX ' in subprocess.check_output(('cat', '/proc/cpuinfo'))
+    return ' avx ' in subprocess.check_output(('cat', '/proc/cpuinfo'))
 
 
 def win_avx_supported():
