@@ -1,3 +1,5 @@
+import multiprocessing
+
 __author__ = 'samyvilar'
 
 from itertools import islice, izip, imap, chain, starmap, repeat, product, izip_longest
@@ -134,31 +136,6 @@ try:
         except Exception as er:
             logging.warning('failed to register c implementation: {0} err: {1}'.format(_c_name, er))
 
-    # def area_float_c(points):
-    #     points = conv_to_numpy(points, 'float32')
-    #     cords_ptr = points.ravel().ctypes.data_as(ctypes.POINTER(ctypes.c_float))
-    #     return poly_area_so.area_of_irregular_polygon_from_cords_float(cords_ptr, len(points))
-    #
-    # def area_double_c(points):
-    #     points = conv_to_numpy(points, 'float64')
-    #     cords_ptr = points.ravel().ctypes.data_as(ctypes.POINTER(ctypes.c_double))
-    #     return poly_area_so.area_of_irregular_polygon_from_cords_double(cords_ptr, len(points))
-    #
-    # def area_float_c_sse(points):
-    #     aligned_mem_block = numpy_allocate_aligned_shared_mem_block((len(points), 2), 'float32', 16)
-    #     aligned_mem_block[:] = points
-    #     return poly_area_so.area_of_irregular_polygon_from_cords_sse_float(
-    #         aligned_mem_block.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
-    #         len(points)
-    #     )
-    #
-    # def area_float_c_avx(points):
-    #     aligned_mem_block = numpy_allocate_aligned_shared_mem_block((len(points), 2), 'float32', 32)
-    #     aligned_mem_block[:] = points
-    #     return poly_area_so.area_of_irregular_polygon_from_cords_avx_float(
-    #         aligned_mem_block.ctypes.data_as(ctypes.POINTER(ctypes.c_float), len(points))
-    #     )
-
 except OSError as _:
     logging.warning('Failed to load shared object msg: {0}'.format(_))
 
@@ -182,15 +159,37 @@ def avx_supported(impls=default_impls):
     return impls[platform.system()]()
 
 
+def broad_cast(func, values):
+    pass
+
+
 if __name__ == '__main__':
     # pre_allocate all the arguments ...
     polygon = diag_gen(2*10**5)
     aligned_mem_block_float = numpy_allocate_aligned_shared_mem_block((len(polygon), 2), 'float32', 32)
     aligned_mem_block_double = numpy_allocate_aligned_shared_mem_block((len(polygon), 2), 'float64', 32)
+
     aligned_mem_block_float[:] = polygon
     aligned_mem_block_double[:] = polygon
+
     polygon_floats = aligned_mem_block_float.ctypes.data_as(ctypes.POINTER(ctypes.c_float))
     polygon_doubles = aligned_mem_block_double.ctypes.data_as(ctypes.POINTER(ctypes.c_double))
+
+    # segment_sizes = [len(polygon)/cpu_count()] * cpu_count()
+    # polygon_floats_addresses = tuple(
+    #     aligned_mem_block_float[cpu_index*segment_size:((cpu_index + 1)*segment_size + 1)].ctypes.data
+    #     for cpu_index, segment_size in enumerate(segment_sizes)
+    # )
+    # for i in xrange(len(segment_sizes) - 1):
+    #     segment_sizes[i] += 2
+    # segment_sizes[-1] += len(polygon) % cpu_count()
+    # args = zip(polygon_floats_addresses, segment_sizes)
+    #
+    # def apply_irreg_poly_area_from_addrs(args):
+    #     return poly_area_so.irreg_poly_area_sse_float(ctypes.cast(args[0], ctypes.POINTER(ctypes.c_float)), args[1])
+    #
+    # def poly_area_sse_float_multi_cpu(args, pool=multiprocessing.Pool(processes=cpu_count())):
+    #     return abs(sum(pool.map(apply_irreg_poly_area_from_addrs, args)))/2
 
     impls =                         \
         ('area', 'polygon'),        \
@@ -203,7 +202,7 @@ if __name__ == '__main__':
     if avx_supported():
         impls += (
             ('poly_area_so.' + c_impl_poly_area_name('float', 'avx'), 'polygon_floats, len(polygon)'),
-            # ('poly_area_so.' + c_impl_poly_area_name('double', 'avx'), 'polygon_floats, len(polygon)')
+            ('poly_area_so.' + c_impl_poly_area_name('double', 'avx'), 'polygon_doubles, len(polygon)')
         )
 
     repeat_cnt = 10
