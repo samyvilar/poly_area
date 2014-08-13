@@ -1,13 +1,17 @@
 __author__ = 'samyvilar'
 
-from itertools import islice, izip, imap, chain, starmap
+from itertools import islice, izip, imap, chain, starmap, repeat, product, izip_longest
 import logging
 import ctypes
 import numpy
 import timeit
-import time
+import sys
+import platform
+import subprocess
 
-from multiprocessing import sharedctypes
+from multiprocessing import sharedctypes, cpu_count
+
+current_module = sys.modules[__name__]
 
 
 def diag_gen(length):  # 1 loops, best of 3: 543 ms per loop
@@ -58,95 +62,167 @@ def area_iter(points):
 
 
 # noinspection PyNoneFunctionAssignment
-def numpy_allocate_aligned_shared_mem_block(shape_or_count, dtype, alignment_bytes, segment_count=1):
+def numpy_allocate_aligned_shared_mem_block(
+        shape_or_count,
+        dtype,
+        alignment_bytes=0,
+        segment_count=cpu_count(),
+        init=()
+):
     # Create an aligned numpy array using a shared memory block,
     # in order to avoid copying values in between processes as well be able to call faster *_load_* intrinsics ...
-    count = numpy.product(shape_or_count)
-    item_size = numpy.dtype(dtype).itemsize
+    item_count, item_size = numpy.product(shape_or_count), numpy.dtype(dtype).itemsize
     # Add alignment bytes for better SSE/AVX performance ...
-    size_in_bytes = ((item_size * count) + (segment_count * alignment_bytes))
+    size_in_bytes = ((item_size * item_count) + (segment_count * alignment_bytes))
     raw_array = sharedctypes.RawArray('b', size_in_bytes)
     _buf = numpy.frombuffer(raw_array, dtype='b')
-    start_index = -_buf.ctypes.data % alignment_bytes
+    start_index = -_buf.ctypes.data % max(alignment_bytes, 1)
     # get numpy array aligned ...
-    return _buf[start_index:start_index + count*item_size].view(dtype).reshape(shape_or_count)
+    values = _buf[start_index:start_index + item_count*item_size].view(dtype).reshape(shape_or_count)
+    if init:
+        values[:] = init
+    return values
 
+
+prefix_name, cord_type_names, intrinsic_names = 'irreg_poly_area', {'float', 'double'}, {'', 'sse', 'avx'}
+
+
+def c_impl_poly_area_name(memb_type_name, intrs_name='', prefix_name=prefix_name):
+    return prefix_name + '_' + (intrs_name + (intrs_name and '_')) + memb_type_name
+
+
+c_impl_names = tuple(starmap(c_impl_poly_area_name, product(cord_type_names, intrinsic_names)))
+
+
+def conv_to_numpy(values, dtype):
+    return numpy.asarray(values, dtype=dtype) if type(values) != numpy.ndarray or values.dtype != dtype else values
+
+
+def conv_to_numpy_aligned(values, dtype, alignment_bytes):
+    if type(values) != numpy.ndarray or values.dtype != dtype or values.ctypes.data % alignment_bytes:
+        values = numpy_allocate_aligned_shared_mem_block(
+            (len(values), 2), dtype, alignment_bytes=alignment_bytes, init=values
+        )
+    return values
+
+
+def py_func_wrapper_c(impl_func, memb_type, alignment=0):
+    def py_func(points, memb_type=memb_type, alignment=alignment, impl_func=impl_func):
+        points = (alignment and conv_to_numpy or conv_to_numpy)(points, memb_type)
+        return impl_func(points.ravel().ctypes.data_as(impl_func.argtypes[0]), len(points))
+    return py_func
 
 try:
     poly_area_so = ctypes.CDLL('libpoly_area.so')
-    poly_area_so.area_of_irregular_polygon_from_cords_float.argtypes = [ctypes.POINTER(ctypes.c_float), ctypes.c_ulong]
-    poly_area_so.area_of_irregular_polygon_from_cords_float.restype = ctypes.c_float
 
-    poly_area_so.area_of_irregular_polygon_from_cords_sse_float.argtypes = [
-        ctypes.POINTER(ctypes.c_float), ctypes.c_ulong
-    ]
-    poly_area_so.area_of_irregular_polygon_from_cords_sse_float.restype = ctypes.c_float
+    for _c_name in c_impl_names:
+        try:
+            c_impl_ref = getattr(poly_area_so, _c_name)
+            c_intrs_type_name, c_cord_type_name = _c_name.split(prefix_name)[1].split('_')[-2:]
+            c_cord_type = getattr(ctypes, 'c_' + c_cord_type_name)
+            c_impl_ref.argtypes = [ctypes.POINTER(c_cord_type), ctypes.c_ulong]
+            c_impl_ref.restype = c_cord_type
+            setattr(
+                current_module,
+                'area_' + (c_intrs_type_name + (c_intrs_type_name and '_')) + c_intrs_type_name + '_c',
+                py_func_wrapper_c(
+                    c_impl_ref,
+                    c_cord_type,
+                    alignment=32 * bool(c_intrs_type_name)
+                )
+            )
+        except Exception as er:
+            logging.warning('failed to register c implementation: {0} err: {1}'.format(_c_name, er))
 
-    poly_area_so.area_of_irregular_polygon_from_cords_avx_float.argtypes = [
-        ctypes.POINTER(ctypes.c_float), ctypes.c_ulong
-    ]
-    poly_area_so.area_of_irregular_polygon_from_cords_avx_float.restype = ctypes.c_float
-
-    poly_area_so.area_of_irregular_polygon_from_cords_double.argtypes = [
-        ctypes.POINTER(ctypes.c_double), ctypes.c_ulong
-    ]
-    poly_area_so.area_of_irregular_polygon_from_cords_double.restype = ctypes.c_double
-
-    def area_float_c(points):
-        cords_ptr = numpy.asarray(points, dtype='float32').ravel().ctypes.data_as(ctypes.POINTER(ctypes.c_float))
-        return poly_area_so.area_of_irregular_polygon_from_cords_float(cords_ptr, len(points))
-
-    def area_float_c_sse(points):
-        aligned_mem_block = numpy_allocate_aligned_shared_mem_block((len(points), 2), 'float32', 16)
-        aligned_mem_block[:] = points
-        return poly_area_so.area_of_irregular_polygon_from_cords_sse_float(
-            aligned_mem_block.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
-            len(points)
-        )
-
-    def area_float_c_avx(points):
-        aligned_mem_block = numpy_allocate_aligned_shared_mem_block((len(points), 2), 'float32', 32)
-        aligned_mem_block[:] = points
-        return poly_area_so.area_of_irregular_polygon_from_cords_avx_float(
-            aligned_mem_block.ctypes.data_as(ctypes.POINTER(ctypes.c_float), len(points))
-        )
-
-    def area_double_c(points):
-        cords_ptr = numpy.asarray(points, dtype='float64').ravel().ctypes.data_as(ctypes.POINTER(ctypes.c_double))
-        return poly_area_so.area_of_irregular_polygon_from_cords_double(cords_ptr, len(points))
+    # def area_float_c(points):
+    #     points = conv_to_numpy(points, 'float32')
+    #     cords_ptr = points.ravel().ctypes.data_as(ctypes.POINTER(ctypes.c_float))
+    #     return poly_area_so.area_of_irregular_polygon_from_cords_float(cords_ptr, len(points))
+    #
+    # def area_double_c(points):
+    #     points = conv_to_numpy(points, 'float64')
+    #     cords_ptr = points.ravel().ctypes.data_as(ctypes.POINTER(ctypes.c_double))
+    #     return poly_area_so.area_of_irregular_polygon_from_cords_double(cords_ptr, len(points))
+    #
+    # def area_float_c_sse(points):
+    #     aligned_mem_block = numpy_allocate_aligned_shared_mem_block((len(points), 2), 'float32', 16)
+    #     aligned_mem_block[:] = points
+    #     return poly_area_so.area_of_irregular_polygon_from_cords_sse_float(
+    #         aligned_mem_block.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
+    #         len(points)
+    #     )
+    #
+    # def area_float_c_avx(points):
+    #     aligned_mem_block = numpy_allocate_aligned_shared_mem_block((len(points), 2), 'float32', 32)
+    #     aligned_mem_block[:] = points
+    #     return poly_area_so.area_of_irregular_polygon_from_cords_avx_float(
+    #         aligned_mem_block.ctypes.data_as(ctypes.POINTER(ctypes.c_float), len(points))
+    #     )
 
 except OSError as _:
     logging.warning('Failed to load shared object msg: {0}'.format(_))
 
+
+def mac_avx_supported():
+    return ' AVX ' in subprocess.check_output(('sysctl', '-a', 'machdep.cpu.features'))
+
+
+def linux_avx_supported():
+    return ' AVX ' in subprocess.check_output(('cat', '/proc/cpuinfo'))
+
+
+def win_avx_supported():
+    raise NotImplementedError
+
+
+default_impls = {'Darwin': mac_avx_supported, 'Linux': linux_avx_supported, 'Windows': win_avx_supported}
+
+
+def avx_supported(impls=default_impls):
+    return impls[platform.system()]()
+
+
 if __name__ == '__main__':
     # pre_allocate all the arguments ...
     polygon = diag_gen(2*10**5)
-    aligned_mem_block_float = numpy_allocate_aligned_shared_mem_block((len(polygon), 2), 'float32', 16)
+    aligned_mem_block_float = numpy_allocate_aligned_shared_mem_block((len(polygon), 2), 'float32', 32)
+    aligned_mem_block_double = numpy_allocate_aligned_shared_mem_block((len(polygon), 2), 'float64', 32)
     aligned_mem_block_float[:] = polygon
-    polygon_cfloats = aligned_mem_block_float.ctypes.data_as(ctypes.POINTER(ctypes.c_float))
-    aligned_mem_block_double = numpy_allocate_aligned_shared_mem_block((len(polygon), 2), 'float64', 16)
     aligned_mem_block_double[:] = polygon
-    polygon_cdoubles = aligned_mem_block_double.ctypes.data_as(ctypes.POINTER(ctypes.c_double))
+    polygon_floats = aligned_mem_block_float.ctypes.data_as(ctypes.POINTER(ctypes.c_float))
+    polygon_doubles = aligned_mem_block_double.ctypes.data_as(ctypes.POINTER(ctypes.c_double))
 
-    implementations = \
-        ('area', 'polygon'), \
-        ('area_iter', 'polygon'), \
-        ('poly_area_so.area_of_irregular_polygon_from_cords_double', 'polygon_cdoubles, len(polygon)'),\
-        ('poly_area_so.area_of_irregular_polygon_from_cords_float', 'polygon_cfloats, len(polygon)'), \
-        ('poly_area_so.area_of_irregular_polygon_from_cords_sse_float', 'polygon_cfloats, len(polygon)'),\
-        ('poly_area_so.area_of_irregular_polygon_from_cords_avx_float', 'polygon_cfloats, len(polygon)')
+    impls =                         \
+        ('area', 'polygon'),        \
+        ('area_iter', 'polygon'),   \
+        ('poly_area_so.' + c_impl_poly_area_name('double'), 'polygon_doubles, len(polygon)'),           \
+        ('poly_area_so.' + c_impl_poly_area_name('float'), 'polygon_floats, len(polygon)'),             \
+        ('poly_area_so.' + c_impl_poly_area_name('double', 'sse'), 'polygon_doubles, len(polygon)'),    \
+        ('poly_area_so.' + c_impl_poly_area_name('float', 'sse'), 'polygon_floats, len(polygon)')
+
+    if avx_supported():
+        impls += (
+            ('poly_area_so.' + c_impl_poly_area_name('float', 'avx'), 'polygon_floats, len(polygon)'),
+            # ('poly_area_so.' + c_impl_poly_area_name('double', 'avx'), 'polygon_floats, len(polygon)')
+        )
 
     repeat_cnt = 10
-    setup = 'from __main__ import poly_area_so, area, area_iter, polygon, polygon_cdoubles, polygon_cfloats'
-    base_line = timeit.timeit('area(polygon)', setup=setup, number=repeat_cnt)
-    timings = (
-        timeit.timeit('{0}({1})'.format(impl, arg), setup=setup, number=repeat_cnt)
-        for impl, arg in implementations
+    setup = 'from __main__ import poly_area_so, area, area_iter, polygon, polygon_doubles, polygon_floats'
+
+    base_line_result = area(polygon)
+    base_line_time = timeit.timeit('area(polygon)', setup=setup, number=repeat_cnt)
+    errors = (abs((base_line_result - eval(expr))/base_line_result) for expr in starmap('{0}({1})'.format, impls))
+    timings = imap(
+        timeit.timeit,
+        starmap('{0}({1})'.format, impls),
+        repeat(setup),
+        repeat(timeit.default_timer),
+        repeat(repeat_cnt)
     )
 
-    for info, timing in izip(implementations, timings):
-        print('{0}: {1}, {2}x faster vs py_area'.format(
-            info[0], timing/repeat_cnt, (base_line/timing)
+    for info, timing, error in izip(impls, timings, errors):
+        print('{name}: {avg_time}s, {speedup_factor}x faster vs py_area, rel_err: {rel_err}%'.format(
+            name=info[0], avg_time=timing/repeat_cnt, speedup_factor=base_line_time/timing, rel_err=error*100
         ))
 
 

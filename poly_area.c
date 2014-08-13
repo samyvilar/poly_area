@@ -27,19 +27,11 @@
 
 extern void error_applying_unsupported_type();
 
-#define scalar_abs(expr) ({                                                                         \
-    typedef typeof(expr) __expr_t_abs_;                                                             \
-    select_expr(type_eq(__expr_t_abs_, double), double_abs(expr),                                 \
-    select_expr(type_eq(__expr_t_abs_, float), float_abs(expr),                                   \
+#define scalar_abs(expr) ({                                         \
+    typedef typeof(expr) __expr_t_abs_;                             \
+    select_expr(type_eq(__expr_t_abs_, double), double_abs(expr),   \
+    select_expr(type_eq(__expr_t_abs_, float), float_abs(expr),     \
         error_applying_unsupported_type())); })
-//    select_expr(type_eq(__expr_t_abs_, signed char) || is_expr_t(__expr_t_abs_, char), (unsigned char)sint_abs(expr),\
-//    select_expr(type_eq(__expr_t_abs_, short), (unsigned short)sint_abs(expr),                    \
-//    select_expr(type_eq(__expr_t_abs_, int), (unsigned int)sint_abs(expr),                     \
-//    select_expr(type_eq(__expr_t_abs_, signed long int), (unsigned int)sint_abs(expr),         \
-//    select_expr(type_eq(__expr_t_abs_, long long int), (unsigned long long)sint_abs(expr),     \
-//        expr)))))));                                                                                \
-//})
-
 
 // we can a divide a float by 2, assuming it is sufficiently large, by subtracting 1 from its exponent ....
 #define DOUBLE_INDEX_OF_EXPONENT 52
@@ -48,23 +40,22 @@ extern void error_applying_unsupported_type();
 #define float_half(expr)  re_interp((re_interp(expr, float, int) - (1 << FLOAT_INDEX_OF_EXPONENT)), int, float)
 //#define integral_half(expr) ((expr) >> 1)
 
-#define scalar_half(expr)                                               \
-    select_expr(type_eq(typeof(expr), double), double_half(expr),       \
-    select_expr(type_eq(typeof(expr), float), float_half(expr),         \
+#define scalar_half(expr)                                           \
+    select_expr(type_eq(typeof(expr), double), double_half(expr),   \
+    select_expr(type_eq(typeof(expr), float), float_half(expr),     \
         error_applying_unsupported_type()))
-//        integral_half(expr)))
 
 
-#define cord_x(v) (v[0])
-#define cord_y(v) (v[1])
+#define cord_x(v) ((v)[0])
+#define cord_y(v) ((v)[1])
 
 #define _calc_diff_of_adj_prods(cords, index) \
-    ((cord_x(cords[index]) * cord_y(cords[index + 1])) - (cord_y(cords[index]) * cord_x(cords[index + 1])))
+    ((cord_x(cords[index]) * cord_y(cords[(index) + 1])) - (cord_y(cords[index]) * cord_x(cords[(index) + 1])))
 
 
 // calculate area of an irregular polygon using its flatten array of its coordinates ...
 #define area_of_irregular_polygon_from_cords_tmpl(member_type, prefix_name)     \
-    member_type area_of_irregular_polygon_from_cords_ ## prefix_name(           \
+    member_type irreg_poly_area_ ## prefix_name(                                \
         member_type cords[][2],                                                 \
         unsigned long cords_len                                                 \
     ) {                                                                         \
@@ -81,59 +72,59 @@ area_of_irregular_polygon_from_cords_tmpl(double, double)
 
 area_of_irregular_polygon_from_cords_tmpl(float, float)
 
-
-
 #define _mm_abs_ps(v) _mm_andnot_ps(_mm_set1_ps(-0.0f), v)
-#ifndef __SSE3__
-//    dst[31:0] := a[63:32] + a[31:0]
-//    dst[63:32] := a[127:96] + a[95:64]
-//    dst[95:64] := b[63:32] + b[31:0]
-//    dst[127:96] := b[127:96] + b[95:64]
-    #define _mm_hadd_ps(a, b)                               \
-        _mm_add_ps(                                         \
-            _mm_shuffle_ps(a, b, _MM_SHUFFLE(3, 1, 3, 1)),  \
-            _mm_shuffle_ps(a, b, _MM_SHUFFLE(2, 0, 2, 0))   \
-        )
-#endif
 
-// x_0, y_0, x_1, y_1
-// x_1, y_1, x_2, y_2
-// y_1, x_1, y_2, x_2
-//1) load x_0, y_0, x_1, y_1
-//2) load x_1, y_1, x_2, y_2
-//3) shuf y_1, x_1, y_2, x_2
-//4) mul x_0*y_1, y_0*x_1, x_1*y_2, y_1*x_2
 
-// x_0*y_1 - y_0*x_1, x_1*y_2 - y_1*x_2,
-
-// x_2*y_3 - y_2*x_3, x_3*y_4 - y_3*x_4
-
-float area_of_irregular_polygon_from_cords_sse_float(float cords[][2], unsigned long cords_len) {
+float irreg_poly_area_sse_float(float cords[][2], unsigned long cords_len) {
     if (__builtin_expect(is_null(cords) || cords_len == 0, 0))
         return 0;
 
-    __m128 accum_sum = _mm_setzero_ps();
-    float accum_sum_aux = 0;
+    __m128 curr, next, end, accum_sum = _mm_setzero_ps();
     unsigned long index;
 
     for (index = 0; (index + 4) < (cords_len - 1); index += 4) {
-        __m128 low = _mm_load_ps((const float *)cords + index), // x0, y0, x1, y1
-               high = _mm_load_ps((const float *)cords + index + 4), // x2, y2, x3, y3
-               end = _mm_load_ps((const float *)cords + index + 8); // x4 y4
+        curr = _mm_load_ps((const float *)&cords[index]), // x0, y0, x1, y1
+        next = _mm_load_ps((const float *)&cords[index + 2]), // x2, y2, x3, y3
+        end = _mm_load_ps((const float *)&cords[index + 4]); // x4 y4, x5, y5
 
-        accum_sum = _mm_add_ps(
+        accum_sum = _mm_add_ps( // accumulate differences ...
             accum_sum,
-            _mm_hsub_ps(
-                _mm_mul_ps(low, _mm_shuffle_ps(low, high, _MM_SHUFFLE(0, 1, 2, 3))),
-                _mm_mul_ps(high, _mm_shuffle_ps(high, end, _MM_SHUFFLE(0, 1, 2, 3)))
+            _mm_hsub_ps( // x0*y1 - y0*x1, x1*y2 - y1*x2, x2*y3 - y2*x3, x3*y4 - y3*x4
+                _mm_mul_ps(curr, _mm_shuffle_ps(curr, next, _MM_SHUFFLE(0, 1, 2, 3))), // x0*y1, y0*x1, x1*y2, y1*x2
+                _mm_mul_ps(next, _mm_shuffle_ps(next, end, _MM_SHUFFLE(0, 1, 2, 3))) // x2*y3, y2*x3, x3*y4, y3*x4
             )
         );
     }
 
     accum_sum = _mm_hadd_ps(accum_sum, accum_sum);
     accum_sum = _mm_hadd_ps(accum_sum, accum_sum);
-    accum_sum_aux += _mm_cvtss_f32(accum_sum);
+    float accum_sum_aux = _mm_cvtss_f32(accum_sum);
+    for (; index < (cords_len - 1); index++)
+        accum_sum_aux += _calc_diff_of_adj_prods(cords, index);
 
+    return scalar_half(scalar_abs(accum_sum_aux));
+}
+
+double irreg_poly_area_sse_double(double cords[][2], unsigned long cords_len) {
+    if (__builtin_expect(is_null(cords) || cords_len == 0, 0))
+        return 0;
+
+    __m128d curr, next, end, accum_sum = _mm_setzero_pd();
+    unsigned long index;
+
+    for (index = 0; (index + 2) < (cords_len - 1); index += 2) {
+        curr = _mm_load_pd((const double *)&cords[index]), // x0, y0
+        next = _mm_load_pd((const double *)&cords[index + 1]), // x1, y1
+        end = _mm_load_pd((const double *)&cords[index + 2]); // x2, y2
+        accum_sum = _mm_add_pd(
+            accum_sum,
+            _mm_hsub_pd( //y0*x1 - x0*y1, y1*x2 - x1*y2
+                _mm_mul_pd(curr, _mm_shuffle_pd(next, next, _MM_SHUFFLE2(0, 1))), // x0*y1, y0*x1
+                _mm_mul_pd(next, _mm_shuffle_pd(end, end, _MM_SHUFFLE2(0, 1))) // x1*y2, y1*x2
+            )
+        );
+    }
+    double accum_sum_aux = _mm_cvtsd_f64(_mm_hadd_pd(accum_sum, accum_sum));
     for (; index < (cords_len - 1); index++)
         accum_sum_aux += _calc_diff_of_adj_prods(cords, index);
 
@@ -141,33 +132,40 @@ float area_of_irregular_polygon_from_cords_sse_float(float cords[][2], unsigned 
 }
 
 #ifdef __AVX__
-float area_of_irregular_polygon_from_cords_avx_float(float cords[][2], unsigned long cords_len) {
+float irreg_poly_area_avx_float(float cords[][2], unsigned long cords_len) {
     if (__builtin_expect(is_null(cords) || cords_len == 0, 0))
         return 0;
 
-    __m256 accum_sum = _mm256_setzero_ps();
-    float accum_sum_aux = 0;
+    __m256 curr, next, end, forw, accum_sum = _mm256_setzero_ps();
     unsigned long index;
 
     for (index = 0; (index + 8) < (cords_len - 1); index += 8) {
-        typeof(accum_sum)
-                low = _mm256_load_ps((const float *)cords + index), // x0, y0, x1, y1, x2, y2, x3, y3
-                high = _mm256_load_ps((const float *)cords + index + 8), // x4, y4 ... x7, y7 ...
-                end = _mm256_load_ps((const float *)cords + index + 16); // x8, y8
+        curr = _mm256_load_ps((const float *)&cords[index]);     // x0,y0,x1,y1,x2,y2,x3,y3
+        next = _mm256_loadu_ps((const float *)&cords[index + 1]); // x1,y1,x2,y2,x3,y3,x4,y4
+        end = _mm256_load_ps((const float *)&cords[index + 4]);  // x4,y4,x5,y5,x6,y6,x7,y7
+        forw = _mm256_loadu_ps((const float *)&cords[index + 5]);
+
+        // x0*y1, y0*x1, x1*y2, y1*x2 || x2*y3, y2*x3, x3*y4, y3*x4
+        curr = _mm256_mul_ps(curr, _mm256_shuffle_ps(curr, next, _MM_SHUFFLE(2, 3, 2, 3)));
+
+        // x4*y5, y4*x5, x5*y6, y5*x6, || x6*y7, y6*x7, x7*y8, y7*x8
+        next = _mm256_mul_ps(end, _mm256_shuffle_ps(end, forw, _MM_SHUFFLE(2, 3, 2, 3)));
 
         accum_sum = _mm256_add_ps(
             accum_sum,
             _mm256_hsub_ps(
-                _mm256_mul_ps(low, _mm256_shuffle_ps(low, high, _MM_SHUFFLE(0, 1, 2, 3))),
-                _mm256_mul_ps(high, _mm256_shuffle_ps(high, end, _MM_SHUFFLE(0, 1, 2, 3)))
+                _mm256_permute2f128_ps(curr, next, 0b100000),
+                _mm256_permute2f128_ps(curr, next, 0b110001)
             )
         );
     }
 
-    accum_sum = _mm256_hadd_ps(accum_sum, accum_sum); // add 8
-    accum_sum = _mm256_hadd_ps(accum_sum, accum_sum); // add 4
-    accum_sum_aux += _mm_cvtss_f32(_mm256_extractf128_ps(accum_sum, 0));
+    // a0+a1, a2+a3, a4+a5, a6+a7, a4+a5, a6+a7, a0+a1, a2+a3
+    accum_sum = _mm256_hadd_ps(accum_sum, _mm256_permute2f128_ps(accum_sum, accum_sum, 1));
 
+    accum_sum = _mm256_hadd_ps(accum_sum, accum_sum); // a0+a1+a2+a3, a4+a5+a6+a7, ...
+    accum_sum = _mm256_hadd_ps(accum_sum, accum_sum); // a0+a1+a2+a3+a4+a5+a6+a7, ...
+    float accum_sum_aux = _mm_cvtss_f32(_mm256_extractf128_ps(accum_sum, 0));
     for (; index < (cords_len - 1); index++)
         accum_sum_aux += _calc_diff_of_adj_prods(cords, index);
 
@@ -175,21 +173,56 @@ float area_of_irregular_polygon_from_cords_avx_float(float cords[][2], unsigned 
 }
 
 
-int main() {
+double irreg_poly_area_avx_double(double cords[][2], unsigned long cords_len) {
+    if (__builtin_expect(is_null(cords) || cords_len == 0, 0))
+        return 0;
 
-    float temp[] = {0.25, 0.25, 1.25, 0.25, 1.25, 1.25, 2.25, 1.25, 2.25, 2.25, 3.25, 2.25, 3.25, 3.25, 4.25, 3.25, 4.25, 4.25, 5.25, 4.25, 5.25, 5.25, 6.25, 5.25, 6.25, 6.25, 7.25, 6.25, 7.25, 7.25, 8.25, 7.25, 8.25, 8.25, 9.25, 8.25, 9.25, 9.25, 10.25, 9.25, 10.25, 10.25, 11.25, 10.25, 11.25, 11.25, 12.25, 11.25, 12.25, 12.25, 13.25, 12.25, 13.25, 13.25, 14.25, 13.25, 14.25, 14.25, 15.25, 14.25, 15.25, 15.25, 16.25, 15.25, 16.25, 16.25, 17.25, 16.25, 17.25, 17.25, 18.25, 17.25, 18.25, 18.25, 19.25, 18.25, 19.25, 19.25, 20.25, 19.25, 20.25, 20.25, 21.25, 20.25, 21.25, 21.25, 22.25, 21.25, 22.25, 22.25, 23.25, 22.25, 23.25, 23.25, 24.25, 23.25, 24.25, 24.25, 25.25, 24.25, 25.25, 25.25, 26.25, 25.25, 26.25, 26.25, 27.25, 26.25, 27.25, 27.25, 28.25, 27.25, 28.25, 28.25, 29.25, 28.25, 29.25, 29.25, 30.25, 29.25, 30.25, 30.25, 31.25, 30.25, 31.25, 31.25, 32.25, 31.25, 32.25, 32.25, 32.25, 33.25, 31.25, 33.25, 31.25, 32.25, 30.25, 32.25, 30.25, 31.25, 29.25, 31.25, 29.25, 30.25, 28.25, 30.25, 28.25, 29.25, 27.25, 29.25, 27.25, 28.25, 26.25, 28.25, 26.25, 27.25, 25.25, 27.25, 25.25, 26.25, 24.25, 26.25, 24.25, 25.25, 23.25, 25.25, 23.25, 24.25, 22.25, 24.25, 22.25, 23.25, 21.25, 23.25, 21.25, 22.25, 20.25, 22.25, 20.25, 21.25, 19.25, 21.25, 19.25, 20.25, 18.25, 20.25, 18.25, 19.25, 17.25, 19.25, 17.25, 18.25, 16.25, 18.25, 16.25, 17.25, 15.25, 17.25, 15.25, 16.25, 14.25, 16.25, 14.25, 15.25, 13.25, 15.25, 13.25, 14.25, 12.25, 14.25, 12.25, 13.25, 11.25, 13.25, 11.25, 12.25, 10.25, 12.25, 10.25, 11.25, 9.25, 11.25, 9.25, 10.25, 8.25, 10.25, 8.25, 9.25, 7.25, 9.25, 7.25, 8.25, 6.25, 8.25, 6.25, 7.25, 5.25, 7.25, 5.25, 6.25, 4.25, 6.25, 4.25, 5.25, 3.25, 5.25, 3.25, 4.25, 2.25, 4.25, 2.25, 3.25, 1.25, 3.25, 1.25, 2.25, 0.25, 2.25, 0.25, 1.25, 0.25, 0.25};
-    if (area_of_irregular_polygon_from_cords_avx_float((float *)temp, sizeof(temp)/8) != 64.0f)
-        printf("test failed got %f!\n", area_of_irregular_polygon_from_cords_avx_float((float *)temp, sizeof(temp)/8));
+    __m256d curr, next, end, forw, accum_sum = _mm256_setzero_pd();
+    unsigned long index;
 
-    return 0;
+    for (index = 0; (index + 4) < (cords_len - 1); index += 4) {
+        curr = _mm256_load_pd((const double *)&cords[index]);      // x0,y0,x1,y1
+        next = _mm256_loadu_pd((const double *)&cords[index + 1]); // x1,y1,x2,y2
+        end = _mm256_load_pd((const double *)&cords[index + 2]);   // x2,y2,x3,y3
+        forw = _mm256_loadu_pd((const double *)&cords[index + 3]); // x3,y3,x4,y4
+
+        // x0*y1, y0*x1 || x1*y2, y1*x2
+        curr = _mm256_mul_pd(curr, _mm256_shuffle_pd(next, next, 0b0101));
+        // x2*y3, y2*x3, || x3*y4, y3*x4
+        next = _mm256_mul_pd(end, _mm256_shuffle_pd(forw, forw, 0b0101));
+
+        accum_sum = _mm256_add_pd(
+            accum_sum,
+            _mm256_hsub_pd(
+                _mm256_permute2f128_pd(curr, next, 0b100000),
+                _mm256_permute2f128_pd(curr, next, 0b110001)
+            )
+        );
+    }
+
+    // a0+a1, a2+a3, a2+a3, a0+a1
+    accum_sum = _mm256_hadd_pd(accum_sum, _mm256_permute2f128_pd(accum_sum, accum_sum, 1));
+    accum_sum = _mm256_hadd_pd(accum_sum, accum_sum); // a0+a1+a2+a3, ...
+    double accum_sum_aux = _mm_cvtsd_f64(_mm256_extractf128_pd(accum_sum, 0));
+    for (; index < (cords_len - 1); index++)
+        accum_sum_aux += _calc_diff_of_adj_prods(cords, index);
+
+    return scalar_half(scalar_abs(accum_sum_aux));
 }
-#else
-float area_of_irregular_polygon_from_cords_avx_float(float cords[][2], unsigned long cords_len) {
-    printf("NO AVX SUPPORT!\n");
-    exit(-1);
-}
+
+
+//int main() {
+//    float temp[] __attribute__ ((aligned (32))) = {0.25, 0.25, 1.25, 0.25, 1.25, 1.25, 2.25, 1.25, 2.25, 2.25, 3.25, 2.25, 3.25, 3.25, 4.25, 3.25, 4.25, 4.25, 5.25, 4.25, 5.25, 5.25, 6.25, 5.25, 6.25, 6.25, 7.25, 6.25, 7.25, 7.25, 8.25, 7.25, 8.25, 8.25, 9.25, 8.25, 9.25, 9.25, 10.25, 9.25, 10.25, 10.25, 11.25, 10.25, 11.25, 11.25, 12.25, 11.25, 12.25, 12.25, 13.25, 12.25, 13.25, 13.25, 14.25, 13.25, 14.25, 14.25, 15.25, 14.25, 15.25, 15.25, 16.25, 15.25, 16.25, 16.25, 17.25, 16.25, 17.25, 17.25, 18.25, 17.25, 18.25, 18.25, 19.25, 18.25, 19.25, 19.25, 20.25, 19.25, 20.25, 20.25, 21.25, 20.25, 21.25, 21.25, 22.25, 21.25, 22.25, 22.25, 23.25, 22.25, 23.25, 23.25, 24.25, 23.25, 24.25, 24.25, 25.25, 24.25, 25.25, 25.25, 26.25, 25.25, 26.25, 26.25, 27.25, 26.25, 27.25, 27.25, 28.25, 27.25, 28.25, 28.25, 29.25, 28.25, 29.25, 29.25, 30.25, 29.25, 30.25, 30.25, 31.25, 30.25, 31.25, 31.25, 32.25, 31.25, 32.25, 32.25, 32.25, 33.25, 31.25, 33.25, 31.25, 32.25, 30.25, 32.25, 30.25, 31.25, 29.25, 31.25, 29.25, 30.25, 28.25, 30.25, 28.25, 29.25, 27.25, 29.25, 27.25, 28.25, 26.25, 28.25, 26.25, 27.25, 25.25, 27.25, 25.25, 26.25, 24.25, 26.25, 24.25, 25.25, 23.25, 25.25, 23.25, 24.25, 22.25, 24.25, 22.25, 23.25, 21.25, 23.25, 21.25, 22.25, 20.25, 22.25, 20.25, 21.25, 19.25, 21.25, 19.25, 20.25, 18.25, 20.25, 18.25, 19.25, 17.25, 19.25, 17.25, 18.25, 16.25, 18.25, 16.25, 17.25, 15.25, 17.25, 15.25, 16.25, 14.25, 16.25, 14.25, 15.25, 13.25, 15.25, 13.25, 14.25, 12.25, 14.25, 12.25, 13.25, 11.25, 13.25, 11.25, 12.25, 10.25, 12.25, 10.25, 11.25, 9.25, 11.25, 9.25, 10.25, 8.25, 10.25, 8.25, 9.25, 7.25, 9.25, 7.25, 8.25, 6.25, 8.25, 6.25, 7.25, 5.25, 7.25, 5.25, 6.25, 4.25, 6.25, 4.25, 5.25, 3.25, 5.25, 3.25, 4.25, 2.25, 4.25, 2.25, 3.25, 1.25, 3.25, 1.25, 2.25, 0.25, 2.25, 0.25, 1.25, 0.25, 0.25};
+//    double temp_double[] __attribute__ ((aligned (32))) = {0.25, 0.25, 1.25, 0.25, 1.25, 1.25, 2.25, 1.25, 2.25, 2.25, 3.25, 2.25, 3.25, 3.25, 4.25, 3.25, 4.25, 4.25, 5.25, 4.25, 5.25, 5.25, 6.25, 5.25, 6.25, 6.25, 7.25, 6.25, 7.25, 7.25, 8.25, 7.25, 8.25, 8.25, 9.25, 8.25, 9.25, 9.25, 10.25, 9.25, 10.25, 10.25, 11.25, 10.25, 11.25, 11.25, 12.25, 11.25, 12.25, 12.25, 13.25, 12.25, 13.25, 13.25, 14.25, 13.25, 14.25, 14.25, 15.25, 14.25, 15.25, 15.25, 16.25, 15.25, 16.25, 16.25, 17.25, 16.25, 17.25, 17.25, 18.25, 17.25, 18.25, 18.25, 19.25, 18.25, 19.25, 19.25, 20.25, 19.25, 20.25, 20.25, 21.25, 20.25, 21.25, 21.25, 22.25, 21.25, 22.25, 22.25, 23.25, 22.25, 23.25, 23.25, 24.25, 23.25, 24.25, 24.25, 25.25, 24.25, 25.25, 25.25, 26.25, 25.25, 26.25, 26.25, 27.25, 26.25, 27.25, 27.25, 28.25, 27.25, 28.25, 28.25, 29.25, 28.25, 29.25, 29.25, 30.25, 29.25, 30.25, 30.25, 31.25, 30.25, 31.25, 31.25, 32.25, 31.25, 32.25, 32.25, 32.25, 33.25, 31.25, 33.25, 31.25, 32.25, 30.25, 32.25, 30.25, 31.25, 29.25, 31.25, 29.25, 30.25, 28.25, 30.25, 28.25, 29.25, 27.25, 29.25, 27.25, 28.25, 26.25, 28.25, 26.25, 27.25, 25.25, 27.25, 25.25, 26.25, 24.25, 26.25, 24.25, 25.25, 23.25, 25.25, 23.25, 24.25, 22.25, 24.25, 22.25, 23.25, 21.25, 23.25, 21.25, 22.25, 20.25, 22.25, 20.25, 21.25, 19.25, 21.25, 19.25, 20.25, 18.25, 20.25, 18.25, 19.25, 17.25, 19.25, 17.25, 18.25, 16.25, 18.25, 16.25, 17.25, 15.25, 17.25, 15.25, 16.25, 14.25, 16.25, 14.25, 15.25, 13.25, 15.25, 13.25, 14.25, 12.25, 14.25, 12.25, 13.25, 11.25, 13.25, 11.25, 12.25, 10.25, 12.25, 10.25, 11.25, 9.25, 11.25, 9.25, 10.25, 8.25, 10.25, 8.25, 9.25, 7.25, 9.25, 7.25, 8.25, 6.25, 8.25, 6.25, 7.25, 5.25, 7.25, 5.25, 6.25, 4.25, 6.25, 4.25, 5.25, 3.25, 5.25, 3.25, 4.25, 2.25, 4.25, 2.25, 3.25, 1.25, 3.25, 1.25, 2.25, 0.25, 2.25, 0.25, 1.25, 0.25, 0.25};
+//    if (irreg_poly_area_avx_float((float *)temp, sizeof(temp)/8) != 64.0f)
+//        printf("test failed got %f!\n", irreg_poly_area_avx_float((float *)temp, sizeof(temp)/8));
+
+//    if (irreg_poly_area_avx_double((double *)temp_double, sizeof(temp_double)/16) != 64.0)
+//        printf("test failed got %f!\n", irreg_poly_area_avx_double((double *)temp_double, sizeof(temp_double)/16));
+
+//    return 0;
+//}
 #endif
-
 
 
 
