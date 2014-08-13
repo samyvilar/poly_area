@@ -1,6 +1,6 @@
 __author__ = 'samyvilar'
 
-from itertools import islice, izip, imap, chain
+from itertools import islice, izip, imap, chain, starmap
 import logging
 import ctypes
 import numpy
@@ -59,10 +59,12 @@ def area_iter(points):
 
 # noinspection PyNoneFunctionAssignment
 def numpy_allocate_aligned_shared_mem_block(shape_or_count, dtype, alignment_bytes, segment_count=1):
+    # Create an aligned numpy array using a shared memory block,
+    # in order to avoid copying values in between processes as well be able to call faster *_load_* intrinsics ...
     count = numpy.product(shape_or_count)
     item_size = numpy.dtype(dtype).itemsize
-    # Add alignment bytes for better SSE performance ...
-    size_in_bytes = ((item_size * count) + (segment_count * alignment_bytes))  # add a couple bytes for alignment ...
+    # Add alignment bytes for better SSE/AVX performance ...
+    size_in_bytes = ((item_size * count) + (segment_count * alignment_bytes))
     raw_array = sharedctypes.RawArray('b', size_in_bytes)
     _buf = numpy.frombuffer(raw_array, dtype='b')
     start_index = -_buf.ctypes.data % alignment_bytes
@@ -113,17 +115,11 @@ try:
         cords_ptr = numpy.asarray(points, dtype='float64').ravel().ctypes.data_as(ctypes.POINTER(ctypes.c_double))
         return poly_area_so.area_of_irregular_polygon_from_cords_double(cords_ptr, len(points))
 
-    # if area_double_c(diag_gen(32)) != 64:
-    #     raise ValueError('Expected 64 got {0}'.format(area_double_c(diag_gen(32))))
-    # if area_float_c(diag_gen(32)) != 64:
-    #     raise ValueError('Expected 64 got {0}'.format(area_float_c(diag_gen(32))))
-    # if area_float_c_sse(diag_gen(32)) != 64:
-    #     raise ValueError('Expected 64 got {0}'.format(area_float_c_sse(diag_gen(32))))
-
 except OSError as _:
     logging.warning('Failed to load shared object msg: {0}'.format(_))
 
 if __name__ == '__main__':
+    # pre_allocate all the arguments ...
     polygon = diag_gen(2*10**5)
     aligned_mem_block_float = numpy_allocate_aligned_shared_mem_block((len(polygon), 2), 'float32', 16)
     aligned_mem_block_float[:] = polygon
@@ -132,36 +128,26 @@ if __name__ == '__main__':
     aligned_mem_block_double[:] = polygon
     polygon_cdoubles = aligned_mem_block_double.ctypes.data_as(ctypes.POINTER(ctypes.c_double))
 
-    implementations = (area, polygon), \
-                      (area_iter, polygon), \
-                      (area_float_c, aligned_mem_block_float), \
-                      (area_float_c_sse, aligned_mem_block_float)
+    implementations = \
+        ('area', 'polygon'), \
+        ('area_iter', 'polygon'), \
+        ('poly_area_so.area_of_irregular_polygon_from_cords_double', 'polygon_cdoubles, len(polygon)'),\
+        ('poly_area_so.area_of_irregular_polygon_from_cords_float', 'polygon_cfloats, len(polygon)'), \
+        ('poly_area_so.area_of_irregular_polygon_from_cords_sse_float', 'polygon_cfloats, len(polygon)'),\
+        ('poly_area_so.area_of_irregular_polygon_from_cords_avx_float', 'polygon_cfloats, len(polygon)')
 
-    for impl in area, area_iter:
-        start = time.time()
-        _ = impl(polygon)
-        end = time.time()
-        print '{0}_py: {1}s'.format(impl.__name__, (end - start))
+    repeat_cnt = 10
+    setup = 'from __main__ import poly_area_so, area, area_iter, polygon, polygon_cdoubles, polygon_cfloats'
+    base_line = timeit.timeit('area(polygon)', setup=setup, number=repeat_cnt)
+    timings = (
+        timeit.timeit('{0}({1})'.format(impl, arg), setup=setup, number=repeat_cnt)
+        for impl, arg in implementations
+    )
 
-    start = time.time()
-    _ = poly_area_so.area_of_irregular_polygon_from_cords_double(polygon_cdoubles, len(polygon))
-    end = time.time()
-    print '{0}: {1}s'.format('area_c_double', (end - start))
-
-    start = time.time()
-    _ = poly_area_so.area_of_irregular_polygon_from_cords_float(polygon_cfloats, len(polygon))
-    end = time.time()
-    print '{0}: {1}s'.format('area_c_float', (end - start))
-
-    start = time.time()
-    _ = poly_area_so.area_of_irregular_polygon_from_cords_sse_float(polygon_cfloats, len(polygon))
-    end = time.time()
-    print '{0}: {1}s'.format('area_c_float_sse', (end - start))
-
-    start = time.time()
-    _ = poly_area_so.area_of_irregular_polygon_from_cords_avx_float(polygon_cfloats, len(polygon))
-    end = time.time()
-    print '{0}: {1}s'.format('area_c_float_avx', (end - start))
+    for info, timing in izip(implementations, timings):
+        print('{0}: {1}, {2}x faster vs py_area'.format(
+            info[0], timing/repeat_cnt, (base_line/timing)
+        ))
 
 
 
