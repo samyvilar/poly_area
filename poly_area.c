@@ -79,13 +79,17 @@ float irreg_poly_area_sse_float(float cords[][2], unsigned long cords_len) {
 //    if (__builtin_expect(is_null(cords) || cords_len == 0, 0))
 //        return 0;
 
-    __m128 curr, next, end, accum_sum = _mm_setzero_ps();
+    __m128
+        curr,
+        next,
+        end = _mm_load_ps((const float *)&cords[0]),
+        accum_sum = _mm_setzero_ps();
     unsigned long index;
 
-    for (index = 0; (index + 4) < (cords_len - 1); index += 4) {
-        curr = _mm_load_ps((const float *)&cords[index]), // x0, y0, x1, y1
-        next = _mm_load_ps((const float *)&cords[index + 2]), // x2, y2, x3, y3
-        end = _mm_load_ps((const float *)&cords[index + 4]); // x4 y4, x5, y5
+    for (index = 0; index < (cords_len - 4); index += 4) { // @@ this will fail if cords_len < 4!
+        curr = end;
+        next = _mm_load_ps((const float *)&cords[index + 2]);
+        end = _mm_load_ps((const float *)&cords[index + 4]);
 
         accum_sum = _mm_add_ps( // accumulate differences ...
             accum_sum,
@@ -94,6 +98,7 @@ float irreg_poly_area_sse_float(float cords[][2], unsigned long cords_len) {
                 _mm_mul_ps(next, _mm_shuffle_ps(next, end, _MM_SHUFFLE(0, 1, 2, 3))) // x2*y3, y2*x3, x3*y4, y3*x4
             )
         );
+
     }
 
     accum_sum = _mm_hadd_ps(accum_sum, accum_sum);
@@ -109,12 +114,12 @@ double irreg_poly_area_sse_double(double cords[][2], unsigned long cords_len) {
 //    if (__builtin_expect(is_null(cords) || cords_len == 0, 0))
 //        return 0;
 
-    __m128d curr, next, end, accum_sum = _mm_setzero_pd();
+    __m128d curr, next, end = _mm_load_pd((const double *)&cords[0]), accum_sum = _mm_setzero_pd();
     unsigned long index;
 
-    for (index = 0; (index + 2) < (cords_len - 1); index += 2) {
-        curr = _mm_load_pd((const double *)&cords[index]), // x0, y0
-        next = _mm_load_pd((const double *)&cords[index + 1]), // x1, y1
+    for (index = 0; index < (cords_len - 2); index += 2) {
+        curr = end; // x0, y0
+        next = _mm_load_pd((const double *)&cords[index + 1]); // x1, y1
         end = _mm_load_pd((const double *)&cords[index + 2]); // x2, y2
         accum_sum = _mm_add_pd(
             accum_sum,
@@ -131,41 +136,43 @@ double irreg_poly_area_sse_double(double cords[][2], unsigned long cords_len) {
     return scalar_half(scalar_abs(accum_sum_aux));
 }
 
-#ifdef __AVX__
+#if 1// ndef __AVX__
 float irreg_poly_area_avx_float(float cords[][2], unsigned long cords_len) {
 //    if (__builtin_expect(is_null(cords) || cords_len == 0, 0))
 //        return 0;
 
-    __m256 curr, next, end, forw, accum_sum = _mm256_setzero_ps();
+    __m256 low, high, curr, forw, end = _mm256_load_ps((const float *)&cords[0][0]), accum_sum = _mm256_setzero_ps();
     unsigned long index;
 
-    for (index = 0; (index + 8) < (cords_len - 1); index += 8) {
-        curr = _mm256_load_ps((const float *)&cords[index]);     // x0,y0,x1,y1,x2,y2,x3,y3
-        next = _mm256_loadu_ps((const float *)&cords[index + 1]); // x1,y1,x2,y2,x3,y3,x4,y4
-        end = _mm256_load_ps((const float *)&cords[index + 4]);  // x4,y4,x5,y5,x6,y6,x7,y7
-        forw = _mm256_loadu_ps((const float *)&cords[index + 5]);
+    for (index = 0; index < (cords_len - 8); index += 8) {
+        curr = end;                                             // x0,y0, ... x3, y3
+        forw = _mm256_load_ps((const float *)&cords[index + 4]); // x4,y4 ... x7, y7
+        end = _mm256_load_ps((const float *)&cords[index + 8]);  // x8,y8 ... x11, y11
 
-        // x0*y1, y0*x1, x1*y2, y1*x2 || x2*y3, y2*x3, x3*y4, y3*x4
-        curr = _mm256_mul_ps(curr, _mm256_shuffle_ps(curr, next, _MM_SHUFFLE(2, 3, 2, 3)));
-
-        // x4*y5, y4*x5, x5*y6, y5*x6, || x6*y7, y6*x7, x7*y8, y7*x8
-        next = _mm256_mul_ps(end, _mm256_shuffle_ps(end, forw, _MM_SHUFFLE(2, 3, 2, 3)));
+        low = _mm256_permute2f128_ps(curr, forw, 0b00100000);    // x0, y0, x1, y1, x4, y4, x5, y5
+        high = _mm256_permute2f128_ps(curr, forw, 0b00110001);   // x2, y2, x3, y3, x6, y6, x7, y7
 
         accum_sum = _mm256_add_ps(
             accum_sum,
             _mm256_hsub_ps(
-                _mm256_permute2f128_ps(curr, next, 0b100000),
-                _mm256_permute2f128_ps(curr, next, 0b110001)
+                _mm256_mul_ps(low, _mm256_shuffle_ps(low, high, 0b00011011)),
+                _mm256_mul_ps(
+                    high,
+                    _mm256_shuffle_ps(
+                        high,
+                        _mm256_permute2f128_ps(forw, end, 0b00100000), // x4, y4, x5, y5, x8, y8, x9, y9
+                        0b00011011
+                    )
+                )
             )
         );
     }
 
     // a0+a1, a2+a3, a4+a5, a6+a7, a4+a5, a6+a7, a0+a1, a2+a3
     accum_sum = _mm256_hadd_ps(accum_sum, _mm256_permute2f128_ps(accum_sum, accum_sum, 1));
-
     accum_sum = _mm256_hadd_ps(accum_sum, accum_sum); // a0+a1+a2+a3, a4+a5+a6+a7, ...
     accum_sum = _mm256_hadd_ps(accum_sum, accum_sum); // a0+a1+a2+a3+a4+a5+a6+a7, ...
-    float accum_sum_aux = _mm_cvtss_f32(_mm256_extractf128_ps(accum_sum, 0));
+    float accum_sum_aux = _mm_cvtss_f32(_mm256_castps256_ps128(accum_sum));
     for (; index < (cords_len - 1); index++)
         accum_sum_aux += _calc_diff_of_adj_prods(cords, index);
 
@@ -177,33 +184,40 @@ double irreg_poly_area_avx_double(double cords[][2], unsigned long cords_len) {
 //    if (__builtin_expect(is_null(cords) || cords_len == 0, 0))
 //        return 0;
 
-    __m256d curr, next, end, forw, accum_sum = _mm256_setzero_pd();
+    __m256d
+        curr,
+        forw,
+        coef_0,
+        coef_1,
+        end = _mm256_load_pd((const double *)cords),
+        accum_sum = _mm256_setzero_pd();
+
     unsigned long index;
+    for (index = 0; index < (cords_len - 4); index += 4) {
+        curr = end;                                                 // x0,y0,x1,y1
+        forw = _mm256_load_pd((const double *)&cords[index + 2]);   // x2,y2,x3,y3
+        end = _mm256_load_pd((const double *)&cords[index + 4]);    // x4,y4,x5,y5
 
-    for (index = 0; (index + 4) < (cords_len - 1); index += 4) {
-        curr = _mm256_load_pd((const double *)&cords[index]);      // x0,y0,x1,y1
-        next = _mm256_loadu_pd((const double *)&cords[index + 1]); // x1,y1,x2,y2
-        end = _mm256_load_pd((const double *)&cords[index + 2]);   // x2,y2,x3,y3
-        forw = _mm256_loadu_pd((const double *)&cords[index + 3]); // x3,y3,x4,y4
+        coef_0 = _mm256_permute2f128_pd(curr, forw, 0b00110001); // x1, y1, x3, y3
+        coef_1 = _mm256_permute2f128_pd(forw, end, 0b00100000); // x2, y2, x4, y4
 
-        // x0*y1, y0*x1 || x1*y2, y1*x2
-        curr = _mm256_mul_pd(curr, _mm256_shuffle_pd(next, next, 0b0101));
-        // x2*y3, y2*x3, || x3*y4, y3*x4
-        next = _mm256_mul_pd(end, _mm256_shuffle_pd(forw, forw, 0b0101));
-
+        //_mm256_hsub_pd(a, b) == a0 - a1, b0 - b1, a2 - a3, b2 - b3
         accum_sum = _mm256_add_pd(
             accum_sum,
-            _mm256_hsub_pd(
-                _mm256_permute2f128_pd(curr, next, 0b100000),
-                _mm256_permute2f128_pd(curr, next, 0b110001)
+            _mm256_hsub_pd( // x0*y1 - y0*x1, x1*y2 - y1x2, x2*y3 - y2*x3, x3*y4 - y3*x4
+                _mm256_mul_pd( // x0*y1, y0*x1, x2*y3, y2*x3
+                    _mm256_permute2f128_pd(curr, forw, 0b00100000),  // x0, y0, x2, y2
+                    _mm256_shuffle_pd(coef_0, coef_0, 0b0101)  // y1, x1, y3, x3
+                ),
+                _mm256_mul_pd(coef_0, _mm256_shuffle_pd(coef_1, coef_1, 0b0101)) // y2, x2, y4, x4
+                // ^^^^^^^^^^^^^^^  x1*y2, y1*x2, x3*y4, y3*x4
             )
         );
     }
 
-    // a0+a1, a2+a3, a2+a3, a0+a1
-    accum_sum = _mm256_hadd_pd(accum_sum, _mm256_permute2f128_pd(accum_sum, accum_sum, 1));
+    accum_sum = _mm256_hadd_pd(accum_sum, _mm256_permute2f128_pd(accum_sum, accum_sum, 1)); // a0+a1, a2+a3, a2+a3, a0+a1
     accum_sum = _mm256_hadd_pd(accum_sum, accum_sum); // a0+a1+a2+a3, ...
-    double accum_sum_aux = _mm_cvtsd_f64(_mm256_extractf128_pd(accum_sum, 0));
+    double accum_sum_aux = _mm_cvtsd_f64(_mm256_castpd256_pd128(accum_sum));
     for (; index < (cords_len - 1); index++)
         accum_sum_aux += _calc_diff_of_adj_prods(cords, index);
 
@@ -212,13 +226,13 @@ double irreg_poly_area_avx_double(double cords[][2], unsigned long cords_len) {
 
 
 //int main() {
-//    float temp[] __attribute__ ((aligned (32))) = {0.25, 0.25, 1.25, 0.25, 1.25, 1.25, 2.25, 1.25, 2.25, 2.25, 3.25, 2.25, 3.25, 3.25, 4.25, 3.25, 4.25, 4.25, 5.25, 4.25, 5.25, 5.25, 6.25, 5.25, 6.25, 6.25, 7.25, 6.25, 7.25, 7.25, 8.25, 7.25, 8.25, 8.25, 9.25, 8.25, 9.25, 9.25, 10.25, 9.25, 10.25, 10.25, 11.25, 10.25, 11.25, 11.25, 12.25, 11.25, 12.25, 12.25, 13.25, 12.25, 13.25, 13.25, 14.25, 13.25, 14.25, 14.25, 15.25, 14.25, 15.25, 15.25, 16.25, 15.25, 16.25, 16.25, 17.25, 16.25, 17.25, 17.25, 18.25, 17.25, 18.25, 18.25, 19.25, 18.25, 19.25, 19.25, 20.25, 19.25, 20.25, 20.25, 21.25, 20.25, 21.25, 21.25, 22.25, 21.25, 22.25, 22.25, 23.25, 22.25, 23.25, 23.25, 24.25, 23.25, 24.25, 24.25, 25.25, 24.25, 25.25, 25.25, 26.25, 25.25, 26.25, 26.25, 27.25, 26.25, 27.25, 27.25, 28.25, 27.25, 28.25, 28.25, 29.25, 28.25, 29.25, 29.25, 30.25, 29.25, 30.25, 30.25, 31.25, 30.25, 31.25, 31.25, 32.25, 31.25, 32.25, 32.25, 32.25, 33.25, 31.25, 33.25, 31.25, 32.25, 30.25, 32.25, 30.25, 31.25, 29.25, 31.25, 29.25, 30.25, 28.25, 30.25, 28.25, 29.25, 27.25, 29.25, 27.25, 28.25, 26.25, 28.25, 26.25, 27.25, 25.25, 27.25, 25.25, 26.25, 24.25, 26.25, 24.25, 25.25, 23.25, 25.25, 23.25, 24.25, 22.25, 24.25, 22.25, 23.25, 21.25, 23.25, 21.25, 22.25, 20.25, 22.25, 20.25, 21.25, 19.25, 21.25, 19.25, 20.25, 18.25, 20.25, 18.25, 19.25, 17.25, 19.25, 17.25, 18.25, 16.25, 18.25, 16.25, 17.25, 15.25, 17.25, 15.25, 16.25, 14.25, 16.25, 14.25, 15.25, 13.25, 15.25, 13.25, 14.25, 12.25, 14.25, 12.25, 13.25, 11.25, 13.25, 11.25, 12.25, 10.25, 12.25, 10.25, 11.25, 9.25, 11.25, 9.25, 10.25, 8.25, 10.25, 8.25, 9.25, 7.25, 9.25, 7.25, 8.25, 6.25, 8.25, 6.25, 7.25, 5.25, 7.25, 5.25, 6.25, 4.25, 6.25, 4.25, 5.25, 3.25, 5.25, 3.25, 4.25, 2.25, 4.25, 2.25, 3.25, 1.25, 3.25, 1.25, 2.25, 0.25, 2.25, 0.25, 1.25, 0.25, 0.25};
-//    double temp_double[] __attribute__ ((aligned (32))) = {0.25, 0.25, 1.25, 0.25, 1.25, 1.25, 2.25, 1.25, 2.25, 2.25, 3.25, 2.25, 3.25, 3.25, 4.25, 3.25, 4.25, 4.25, 5.25, 4.25, 5.25, 5.25, 6.25, 5.25, 6.25, 6.25, 7.25, 6.25, 7.25, 7.25, 8.25, 7.25, 8.25, 8.25, 9.25, 8.25, 9.25, 9.25, 10.25, 9.25, 10.25, 10.25, 11.25, 10.25, 11.25, 11.25, 12.25, 11.25, 12.25, 12.25, 13.25, 12.25, 13.25, 13.25, 14.25, 13.25, 14.25, 14.25, 15.25, 14.25, 15.25, 15.25, 16.25, 15.25, 16.25, 16.25, 17.25, 16.25, 17.25, 17.25, 18.25, 17.25, 18.25, 18.25, 19.25, 18.25, 19.25, 19.25, 20.25, 19.25, 20.25, 20.25, 21.25, 20.25, 21.25, 21.25, 22.25, 21.25, 22.25, 22.25, 23.25, 22.25, 23.25, 23.25, 24.25, 23.25, 24.25, 24.25, 25.25, 24.25, 25.25, 25.25, 26.25, 25.25, 26.25, 26.25, 27.25, 26.25, 27.25, 27.25, 28.25, 27.25, 28.25, 28.25, 29.25, 28.25, 29.25, 29.25, 30.25, 29.25, 30.25, 30.25, 31.25, 30.25, 31.25, 31.25, 32.25, 31.25, 32.25, 32.25, 32.25, 33.25, 31.25, 33.25, 31.25, 32.25, 30.25, 32.25, 30.25, 31.25, 29.25, 31.25, 29.25, 30.25, 28.25, 30.25, 28.25, 29.25, 27.25, 29.25, 27.25, 28.25, 26.25, 28.25, 26.25, 27.25, 25.25, 27.25, 25.25, 26.25, 24.25, 26.25, 24.25, 25.25, 23.25, 25.25, 23.25, 24.25, 22.25, 24.25, 22.25, 23.25, 21.25, 23.25, 21.25, 22.25, 20.25, 22.25, 20.25, 21.25, 19.25, 21.25, 19.25, 20.25, 18.25, 20.25, 18.25, 19.25, 17.25, 19.25, 17.25, 18.25, 16.25, 18.25, 16.25, 17.25, 15.25, 17.25, 15.25, 16.25, 14.25, 16.25, 14.25, 15.25, 13.25, 15.25, 13.25, 14.25, 12.25, 14.25, 12.25, 13.25, 11.25, 13.25, 11.25, 12.25, 10.25, 12.25, 10.25, 11.25, 9.25, 11.25, 9.25, 10.25, 8.25, 10.25, 8.25, 9.25, 7.25, 9.25, 7.25, 8.25, 6.25, 8.25, 6.25, 7.25, 5.25, 7.25, 5.25, 6.25, 4.25, 6.25, 4.25, 5.25, 3.25, 5.25, 3.25, 4.25, 2.25, 4.25, 2.25, 3.25, 1.25, 3.25, 1.25, 2.25, 0.25, 2.25, 0.25, 1.25, 0.25, 0.25};
-//    if (irreg_poly_area_avx_float((float *)temp, sizeof(temp)/8) != 64.0f)
-//        printf("test failed got %f!\n", irreg_poly_area_avx_float((float *)temp, sizeof(temp)/8));
+//    float result_flt, temp[] __attribute__ ((aligned (32))) = {0.25, 0.25, 1.25, 0.25, 1.25, 1.25, 2.25, 1.25, 2.25, 2.25, 3.25, 2.25, 3.25, 3.25, 4.25, 3.25, 4.25, 4.25, 5.25, 4.25, 5.25, 5.25, 6.25, 5.25, 6.25, 6.25, 7.25, 6.25, 7.25, 7.25, 8.25, 7.25, 8.25, 8.25, 9.25, 8.25, 9.25, 9.25, 10.25, 9.25, 10.25, 10.25, 11.25, 10.25, 11.25, 11.25, 12.25, 11.25, 12.25, 12.25, 13.25, 12.25, 13.25, 13.25, 14.25, 13.25, 14.25, 14.25, 15.25, 14.25, 15.25, 15.25, 16.25, 15.25, 16.25, 16.25, 17.25, 16.25, 17.25, 17.25, 18.25, 17.25, 18.25, 18.25, 19.25, 18.25, 19.25, 19.25, 20.25, 19.25, 20.25, 20.25, 21.25, 20.25, 21.25, 21.25, 22.25, 21.25, 22.25, 22.25, 23.25, 22.25, 23.25, 23.25, 24.25, 23.25, 24.25, 24.25, 25.25, 24.25, 25.25, 25.25, 26.25, 25.25, 26.25, 26.25, 27.25, 26.25, 27.25, 27.25, 28.25, 27.25, 28.25, 28.25, 29.25, 28.25, 29.25, 29.25, 30.25, 29.25, 30.25, 30.25, 31.25, 30.25, 31.25, 31.25, 32.25, 31.25, 32.25, 32.25, 32.25, 33.25, 31.25, 33.25, 31.25, 32.25, 30.25, 32.25, 30.25, 31.25, 29.25, 31.25, 29.25, 30.25, 28.25, 30.25, 28.25, 29.25, 27.25, 29.25, 27.25, 28.25, 26.25, 28.25, 26.25, 27.25, 25.25, 27.25, 25.25, 26.25, 24.25, 26.25, 24.25, 25.25, 23.25, 25.25, 23.25, 24.25, 22.25, 24.25, 22.25, 23.25, 21.25, 23.25, 21.25, 22.25, 20.25, 22.25, 20.25, 21.25, 19.25, 21.25, 19.25, 20.25, 18.25, 20.25, 18.25, 19.25, 17.25, 19.25, 17.25, 18.25, 16.25, 18.25, 16.25, 17.25, 15.25, 17.25, 15.25, 16.25, 14.25, 16.25, 14.25, 15.25, 13.25, 15.25, 13.25, 14.25, 12.25, 14.25, 12.25, 13.25, 11.25, 13.25, 11.25, 12.25, 10.25, 12.25, 10.25, 11.25, 9.25, 11.25, 9.25, 10.25, 8.25, 10.25, 8.25, 9.25, 7.25, 9.25, 7.25, 8.25, 6.25, 8.25, 6.25, 7.25, 5.25, 7.25, 5.25, 6.25, 4.25, 6.25, 4.25, 5.25, 3.25, 5.25, 3.25, 4.25, 2.25, 4.25, 2.25, 3.25, 1.25, 3.25, 1.25, 2.25, 0.25, 2.25, 0.25, 1.25, 0.25, 0.25};
+//    double result_dbl, temp_double[] __attribute__ ((aligned (32))) = {0.25, 0.25, 1.25, 0.25, 1.25, 1.25, 2.25, 1.25, 2.25, 2.25, 3.25, 2.25, 3.25, 3.25, 4.25, 3.25, 4.25, 4.25, 5.25, 4.25, 5.25, 5.25, 6.25, 5.25, 6.25, 6.25, 7.25, 6.25, 7.25, 7.25, 8.25, 7.25, 8.25, 8.25, 9.25, 8.25, 9.25, 9.25, 10.25, 9.25, 10.25, 10.25, 11.25, 10.25, 11.25, 11.25, 12.25, 11.25, 12.25, 12.25, 13.25, 12.25, 13.25, 13.25, 14.25, 13.25, 14.25, 14.25, 15.25, 14.25, 15.25, 15.25, 16.25, 15.25, 16.25, 16.25, 17.25, 16.25, 17.25, 17.25, 18.25, 17.25, 18.25, 18.25, 19.25, 18.25, 19.25, 19.25, 20.25, 19.25, 20.25, 20.25, 21.25, 20.25, 21.25, 21.25, 22.25, 21.25, 22.25, 22.25, 23.25, 22.25, 23.25, 23.25, 24.25, 23.25, 24.25, 24.25, 25.25, 24.25, 25.25, 25.25, 26.25, 25.25, 26.25, 26.25, 27.25, 26.25, 27.25, 27.25, 28.25, 27.25, 28.25, 28.25, 29.25, 28.25, 29.25, 29.25, 30.25, 29.25, 30.25, 30.25, 31.25, 30.25, 31.25, 31.25, 32.25, 31.25, 32.25, 32.25, 32.25, 33.25, 31.25, 33.25, 31.25, 32.25, 30.25, 32.25, 30.25, 31.25, 29.25, 31.25, 29.25, 30.25, 28.25, 30.25, 28.25, 29.25, 27.25, 29.25, 27.25, 28.25, 26.25, 28.25, 26.25, 27.25, 25.25, 27.25, 25.25, 26.25, 24.25, 26.25, 24.25, 25.25, 23.25, 25.25, 23.25, 24.25, 22.25, 24.25, 22.25, 23.25, 21.25, 23.25, 21.25, 22.25, 20.25, 22.25, 20.25, 21.25, 19.25, 21.25, 19.25, 20.25, 18.25, 20.25, 18.25, 19.25, 17.25, 19.25, 17.25, 18.25, 16.25, 18.25, 16.25, 17.25, 15.25, 17.25, 15.25, 16.25, 14.25, 16.25, 14.25, 15.25, 13.25, 15.25, 13.25, 14.25, 12.25, 14.25, 12.25, 13.25, 11.25, 13.25, 11.25, 12.25, 10.25, 12.25, 10.25, 11.25, 9.25, 11.25, 9.25, 10.25, 8.25, 10.25, 8.25, 9.25, 7.25, 9.25, 7.25, 8.25, 6.25, 8.25, 6.25, 7.25, 5.25, 7.25, 5.25, 6.25, 4.25, 6.25, 4.25, 5.25, 3.25, 5.25, 3.25, 4.25, 2.25, 4.25, 2.25, 3.25, 1.25, 3.25, 1.25, 2.25, 0.25, 2.25, 0.25, 1.25, 0.25, 0.25};
+//    if ((result_flt = irreg_poly_area_avx_float((float (*)[2])&temp, sizeof(temp)/8)) != 64.0f)
+//        printf("test failed got %f!\n", result_flt);
 
-//    if (irreg_poly_area_avx_double((double *)temp_double, sizeof(temp_double)/16) != 64.0)
-//        printf("test failed got %f!\n", irreg_poly_area_avx_double((double *)temp_double, sizeof(temp_double)/16));
+//    if ((result_dbl = irreg_poly_area_avx_double((double (*)[2])&temp_double, sizeof(temp_double)/16)) != 64.0)
+//        printf("test failed got %f!\n", result_dbl);
 
 //    return 0;
 //}
