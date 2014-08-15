@@ -175,13 +175,17 @@ if __name__ == '__main__':
     polygon_floats = aligned_mem_block_float.ctypes.data_as(ctypes.POINTER(ctypes.c_float))
     polygon_doubles = aligned_mem_block_double.ctypes.data_as(ctypes.POINTER(ctypes.c_double))
 
+    setup = 'from __main__ import poly_area_so, area, area_iter, polygon, polygon_doubles, polygon_floats'
+
     # segment_sizes = [len(polygon)/cpu_count()] * cpu_count()
     # polygon_floats_addresses = tuple(
     #     aligned_mem_block_float[cpu_index*segment_size:((cpu_index + 1)*segment_size + 1)].ctypes.data
     #     for cpu_index, segment_size in enumerate(segment_sizes)
     # )
+    # setup += ', poly_area_sse_float_multi_cpu, args'
+    #
     # for i in xrange(len(segment_sizes) - 1):
-    #     segment_sizes[i] += 2
+    #     segment_sizes[i] += 1
     # segment_sizes[-1] += len(polygon) % cpu_count()
     # args = zip(polygon_floats_addresses, segment_sizes)
     #
@@ -191,7 +195,7 @@ if __name__ == '__main__':
     # def poly_area_sse_float_multi_cpu(args, pool=multiprocessing.Pool(processes=cpu_count())):
     #     return abs(sum(pool.map(apply_irreg_poly_area_from_addrs, args)))/2
 
-    impls =                         \
+    impls = \
         ('area', 'polygon'),        \
         ('area_iter', 'polygon'),   \
         ('poly_area_so.' + c_impl_poly_area_name('double'), 'polygon_doubles, len(polygon)'),           \
@@ -206,7 +210,6 @@ if __name__ == '__main__':
         )
 
     repeat_cnt = 10
-    setup = 'from __main__ import poly_area_so, area, area_iter, polygon, polygon_doubles, polygon_floats'
 
     base_line_result = area(polygon)
     base_line_time = timeit.timeit('area(polygon)', setup=setup, number=repeat_cnt)

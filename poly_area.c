@@ -144,9 +144,14 @@ float irreg_poly_area_avx_float(float cords[][2], unsigned long cords_len) {
 //    if (__builtin_expect(is_null(cords) || cords_len == 0, 0))
 //        return 0;
 
-    __m256 curr, end = _mm256_load_ps((const float *)&cords[0][0]), accum_sum = _mm256_setzero_ps();
-
-    unsigned long index;
+    __m256
+        values_0_3,
+        values_4_7,
+        values_8_11,
+        values_12_15,
+        values_16_19 = _mm256_load_ps((const float *)&cords[0][0]),
+        accum_sum = _mm256_setzero_ps();
+    float accum_sum_aux;
 
     #define _float_cords_dot_prod(curr, next, index)                    \
         _mm256_dp_ps(                                                   \
@@ -158,9 +163,8 @@ float irreg_poly_area_avx_float(float cords[][2], unsigned long cords_len) {
             0b11110000 | (1 << (index))                                 \
         )
 
-    float accum_sum_aux;
-    __m256 values_0_3, values_4_7, values_8_11, values_12_15, values_16_19 = _mm256_load_ps((const float *)&cords[0][0]);
 
+    unsigned long index;
     for (index = 0; index < (cords_len - 16); index += 16) {
         values_0_3   = values_16_19;
         values_4_7   = _mm256_load_ps((const float *)&cords[index + 4]);
