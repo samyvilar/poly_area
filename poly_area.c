@@ -2,6 +2,7 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <immintrin.h>
+#include <string.h>
 
 #define is_null(v) (v == NULL)
 #define bit_size(expr) (sizeof(expr) * CHAR_BIT)
@@ -84,8 +85,9 @@ float irreg_poly_area_sse_float(float cords[][2], unsigned long cords_len) {
         next,
         end = _mm_load_ps((const float *)&cords[0]),
         accum_sum = _mm_setzero_ps();
-    unsigned long index;
+    float accum_sum_aux;
 
+    unsigned long index;
     for (index = 0; index < (cords_len - 4); index += 4) { // @@ this will fail if cords_len < 4!
         curr = end;
         next = _mm_load_ps((const float *)&cords[index + 2]);
@@ -98,13 +100,11 @@ float irreg_poly_area_sse_float(float cords[][2], unsigned long cords_len) {
                 _mm_mul_ps(next, _mm_shuffle_ps(next, end, _MM_SHUFFLE(0, 1, 2, 3))) // x2*y3, y2*x3, x3*y4, y3*x4
             )
         );
-
     }
 
     accum_sum = _mm_hadd_ps(accum_sum, accum_sum);
     accum_sum = _mm_hadd_ps(accum_sum, accum_sum);
-    float accum_sum_aux = _mm_cvtss_f32(accum_sum);
-    for (; index < (cords_len - 1); index++)
+    for (accum_sum_aux = _mm_cvtss_f32(accum_sum); index < (cords_len - 1); index++)
         accum_sum_aux += _calc_diff_of_adj_prods(cords, index);
 
     return scalar_half(scalar_abs(accum_sum_aux));
@@ -115,12 +115,14 @@ double irreg_poly_area_sse_double(double cords[][2], unsigned long cords_len) {
 //        return 0;
 
     __m128d curr, next, end = _mm_load_pd((const double *)&cords[0]), accum_sum = _mm_setzero_pd();
-    unsigned long index;
+    double accum_sum_aux;
 
+    unsigned long index;
     for (index = 0; index < (cords_len - 2); index += 2) {
         curr = end; // x0, y0
         next = _mm_load_pd((const double *)&cords[index + 1]); // x1, y1
         end = _mm_load_pd((const double *)&cords[index + 2]); // x2, y2
+
         accum_sum = _mm_add_pd(
             accum_sum,
             _mm_hsub_pd( //y0*x1 - x0*y1, y1*x2 - x1*y2
@@ -129,51 +131,62 @@ double irreg_poly_area_sse_double(double cords[][2], unsigned long cords_len) {
             )
         );
     }
-    double accum_sum_aux = _mm_cvtsd_f64(_mm_hadd_pd(accum_sum, accum_sum));
-    for (; index < (cords_len - 1); index++)
+
+    for (accum_sum_aux = _mm_cvtsd_f64(_mm_hadd_pd(accum_sum, accum_sum)); index < (cords_len - 1); index++)
         accum_sum_aux += _calc_diff_of_adj_prods(cords, index);
 
     return scalar_half(scalar_abs(accum_sum_aux));
 }
 
+#define _mm256_flip_sign_ps(a) _mm256_xor_ps(a, _mm256_set1_ps(-0.0f))
 #if 1// ndef __AVX__
 float irreg_poly_area_avx_float(float cords[][2], unsigned long cords_len) {
 //    if (__builtin_expect(is_null(cords) || cords_len == 0, 0))
 //        return 0;
 
-    __m256 low, high, curr, forw, end = _mm256_load_ps((const float *)&cords[0][0]), accum_sum = _mm256_setzero_ps();
+    __m256 curr, end = _mm256_load_ps((const float *)&cords[0][0]), accum_sum = _mm256_setzero_ps();
+
     unsigned long index;
 
-    for (index = 0; index < (cords_len - 8); index += 8) {
-        curr = end;                                             // x0,y0, ... x3, y3
-        forw = _mm256_load_ps((const float *)&cords[index + 4]); // x4,y4 ... x7, y7
-        end = _mm256_load_ps((const float *)&cords[index + 8]);  // x8,y8 ... x11, y11
+    #define _float_cords_dot_prod(curr, next, index)                    \
+        _mm256_dp_ps(                                                   \
+            curr,                                                       \
+            _mm256_xor_ps(                                              \
+                _mm256_shuffle_ps(curr, _mm256_permute2f128_ps(curr, next, 0b00100001), 0b00011011),\
+                _mm256_setr_ps(0, -0.0f, 0, -0.0f, 0, -0.0f, 0, -0.0f)  \
+            ),                                                          \
+            0b11110000 | (1 << (index))                                 \
+        )
 
-        low = _mm256_permute2f128_ps(curr, forw, 0b00100000);    // x0, y0, x1, y1, x4, y4, x5, y5
-        high = _mm256_permute2f128_ps(curr, forw, 0b00110001);   // x2, y2, x3, y3, x6, y6, x7, y7
+    float accum_sum_aux;
+    __m256 values_0_3, values_4_7, values_8_11, values_12_15, values_16_19 = _mm256_load_ps((const float *)&cords[0][0]);
+
+    for (index = 0; index < (cords_len - 16); index += 16) {
+        values_0_3   = values_16_19;
+        values_4_7   = _mm256_load_ps((const float *)&cords[index + 4]);
+        values_8_11  = _mm256_load_ps((const float *)&cords[index + 8]);
+        values_12_15 = _mm256_load_ps((const float *)&cords[index + 12]);
+        values_16_19 = _mm256_load_ps((const float *)&cords[index + 16]);
 
         accum_sum = _mm256_add_ps(
             accum_sum,
-            _mm256_hsub_ps(
-                _mm256_mul_ps(low, _mm256_shuffle_ps(low, high, 0b00011011)),
-                _mm256_mul_ps(
-                    high,
-                    _mm256_shuffle_ps(
-                        high,
-                        _mm256_permute2f128_ps(forw, end, 0b00100000), // x4, y4, x5, y5, x8, y8, x9, y9
-                        0b00011011
-                    )
+            _mm256_add_ps(
+                _mm256_add_ps(
+                    _float_cords_dot_prod(values_0_3, values_4_7, 0),
+                    _float_cords_dot_prod(values_4_7, values_8_11, 1)
+                ),
+                _mm256_add_ps(
+                    _float_cords_dot_prod(values_8_11, values_12_15, 2),
+                    _float_cords_dot_prod(values_12_15, values_16_19, 3)
                 )
             )
         );
     }
 
-    // a0+a1, a2+a3, a4+a5, a6+a7, a4+a5, a6+a7, a0+a1, a2+a3
-    accum_sum = _mm256_hadd_ps(accum_sum, _mm256_permute2f128_ps(accum_sum, accum_sum, 1));
+    accum_sum = _mm256_hadd_ps(accum_sum, _mm256_permute2f128_ps(accum_sum, accum_sum, 1)); // a0+a1, a2+a3, a4+a5, a6+a7, a4+a5, a6+a7, a0+a1, a2+a3
     accum_sum = _mm256_hadd_ps(accum_sum, accum_sum); // a0+a1+a2+a3, a4+a5+a6+a7, ...
     accum_sum = _mm256_hadd_ps(accum_sum, accum_sum); // a0+a1+a2+a3+a4+a5+a6+a7, ...
-    float accum_sum_aux = _mm_cvtss_f32(_mm256_castps256_ps128(accum_sum));
-    for (; index < (cords_len - 1); index++)
+    for (accum_sum_aux = _mm_cvtss_f32(_mm256_castps256_ps128(accum_sum)); index < (cords_len - 1); index++)
         accum_sum_aux += _calc_diff_of_adj_prods(cords, index);
 
     return scalar_half(scalar_abs(accum_sum_aux));
@@ -191,6 +204,7 @@ double irreg_poly_area_avx_double(double cords[][2], unsigned long cords_len) {
         coef_1,
         end = _mm256_load_pd((const double *)cords),
         accum_sum = _mm256_setzero_pd();
+    double accum_sum_aux;
 
     unsigned long index;
     for (index = 0; index < (cords_len - 4); index += 4) {
@@ -217,8 +231,7 @@ double irreg_poly_area_avx_double(double cords[][2], unsigned long cords_len) {
 
     accum_sum = _mm256_hadd_pd(accum_sum, _mm256_permute2f128_pd(accum_sum, accum_sum, 1)); // a0+a1, a2+a3, a2+a3, a0+a1
     accum_sum = _mm256_hadd_pd(accum_sum, accum_sum); // a0+a1+a2+a3, ...
-    double accum_sum_aux = _mm_cvtsd_f64(_mm256_castpd256_pd128(accum_sum));
-    for (; index < (cords_len - 1); index++)
+    for (accum_sum_aux = _mm_cvtsd_f64(_mm256_castpd256_pd128(accum_sum)); index < (cords_len - 1); index++)
         accum_sum_aux += _calc_diff_of_adj_prods(cords, index);
 
     return scalar_half(scalar_abs(accum_sum_aux));
