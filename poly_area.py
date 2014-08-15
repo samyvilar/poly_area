@@ -2,7 +2,7 @@ import multiprocessing
 
 __author__ = 'samyvilar'
 
-from itertools import islice, izip, imap, chain, starmap, repeat, product, izip_longest
+from itertools import islice, izip, imap, chain, starmap, repeat, product, izip_longest, ifilterfalse, ifilter
 import logging
 import ctypes
 import numpy
@@ -159,74 +159,185 @@ def avx_supported(impls=default_impls):
     return impls[platform.system()]()
 
 
-def broad_cast(func, values):
-    pass
+supported_intrinsics = {'', 'sse', 'avx' * avx_supported()}
 
 
-if __name__ == '__main__':
-    # pre_allocate all the arguments ...
-    polygon = diag_gen(2*10**5)
-    aligned_mem_block_float = numpy_allocate_aligned_shared_mem_block((len(polygon), 2), 'float32', 32)
-    aligned_mem_block_double = numpy_allocate_aligned_shared_mem_block((len(polygon), 2), 'float64', 32)
+def segment(values, count=cpu_count(), alignment=32):
+    # segments values, returns starting address and length of each segment, properly aligned ...
+    segments = [
+        [values[cpu_index*segment_size:((cpu_index + 1)*segment_size)].ctypes.data, segment_size]
+        for cpu_index, segment_size in enumerate(repeat(len(values)/count, count))
+    ]
 
-    aligned_mem_block_float[:] = polygon
-    aligned_mem_block_double[:] = polygon
+    for index, segment_info in enumerate(segments[1:], 1):
+        while segment_info[0] % alignment:
+            segment_info[0] -= values.itemsize * values[0].size
+            segment_info[1] += 1
+            segments[index - 1][1] -= 1
 
-    polygon_floats = aligned_mem_block_float.ctypes.data_as(ctypes.POINTER(ctypes.c_float))
-    polygon_doubles = aligned_mem_block_double.ctypes.data_as(ctypes.POINTER(ctypes.c_double))
+    return segments
 
-    setup = 'from __main__ import poly_area_so, area, area_iter, polygon, polygon_doubles, polygon_floats'
 
-    # segment_sizes = [len(polygon)/cpu_count()] * cpu_count()
-    # polygon_floats_addresses = tuple(
-    #     aligned_mem_block_float[cpu_index*segment_size:((cpu_index + 1)*segment_size + 1)].ctypes.data
-    #     for cpu_index, segment_size in enumerate(segment_sizes)
-    # )
-    # setup += ', poly_area_sse_float_multi_cpu, args'
-    #
-    # for i in xrange(len(segment_sizes) - 1):
-    #     segment_sizes[i] += 1
-    # segment_sizes[-1] += len(polygon) % cpu_count()
-    # args = zip(polygon_floats_addresses, segment_sizes)
-    #
-    # def apply_irreg_poly_area_from_addrs(args):
-    #     return poly_area_so.irreg_poly_area_sse_float(ctypes.cast(args[0], ctypes.POINTER(ctypes.c_float)), args[1])
-    #
-    # def poly_area_sse_float_multi_cpu(args, pool=multiprocessing.Pool(processes=cpu_count())):
-    #     return abs(sum(pool.map(apply_irreg_poly_area_from_addrs, args)))/2
+def apply_irreg_poly_area_from_addrs(args):
+    c_impl_name = args[0]
+    data_p, data_len = args[1]
+    c_impl_ref = getattr(poly_area_so, c_impl_name)
+    return c_impl_ref(ctypes.cast(data_p, c_impl_ref.argtypes[0]), data_len)
 
-    impls = \
-        ('area', 'polygon'),        \
-        ('area_iter', 'polygon'),   \
-        ('poly_area_so.' + c_impl_poly_area_name('double'), 'polygon_doubles, len(polygon)'),           \
-        ('poly_area_so.' + c_impl_poly_area_name('float'), 'polygon_floats, len(polygon)'),             \
-        ('poly_area_so.' + c_impl_poly_area_name('double', 'sse'), 'polygon_doubles, len(polygon)'),    \
-        ('poly_area_so.' + c_impl_poly_area_name('float', 'sse'), 'polygon_floats, len(polygon)')
 
-    if avx_supported():
-        impls += (
-            ('poly_area_so.' + c_impl_poly_area_name('float', 'avx'), 'polygon_floats, len(polygon)'),
-            ('poly_area_so.' + c_impl_poly_area_name('double', 'avx'), 'polygon_doubles, len(polygon)')
-        )
+multi_cpu_impl_names = []
 
-    repeat_cnt = 10
+for cords_type, intrinsic_type in product(cord_type_names, supported_intrinsics):
+    def c_multi_cpu_func(segment_address_and_lens, pool, c_impl=c_impl_poly_area_name(cords_type, intrinsic_type)):
+        # return sum(map(apply_irreg_poly_area_from_addrs, izip(repeat(c_impl), segment_address_and_lens)))
+        return abs(sum(pool.map(apply_irreg_poly_area_from_addrs, izip(repeat(c_impl), segment_address_and_lens))))/2
 
-    base_line_result = area(polygon)
-    base_line_time = timeit.timeit('area(polygon)', setup=setup, number=repeat_cnt)
-    errors = (abs((base_line_result - eval(expr))/base_line_result) for expr in starmap('{0}({1})'.format, impls))
-    timings = imap(
-        timeit.timeit,
-        starmap('{0}({1})'.format, impls),
-        repeat(setup),
-        repeat(timeit.default_timer),
-        repeat(repeat_cnt)
+    def c_func(ptr, data_len, c_impl=getattr(poly_area_so, c_impl_poly_area_name(cords_type, intrinsic_type))):
+        return abs(c_impl(ptr, data_len))/2
+
+    multi_cpu_impl_names.append(c_impl_poly_area_name(cords_type, intrinsic_type) + '_multi_cpu')
+    setattr(current_module, multi_cpu_impl_names[-1], c_multi_cpu_func)
+    setattr(current_module, c_impl_poly_area_name(cords_type, intrinsic_type), c_func)
+
+
+def run_benchmarks(test_size=2*10**5, repeat_cnt=10, segment_count=cpu_count()):
+    setup_py_data = '''
+from __main__ import diag_gen, area, area_iter, poly_area_so
+polygon = diag_gen({test_size})
+    '''
+
+    c_base_setup = '''
+from __main__ import diag_gen, numpy_allocate_aligned_shared_mem_block, poly_area_so, segment, {0}, {1}
+import numpy
+import ctypes
+    '''.format(','.join(multi_cpu_impl_names), ','.join(c_impl_names))
+
+    setup_c_doubles_data = c_base_setup + '''
+aligned_mem_block_double = numpy_allocate_aligned_shared_mem_block({shape}, 'float64', 32, init=diag_gen({test_size}))
+polygon_doubles = aligned_mem_block_double.ctypes.data_as(ctypes.POINTER(ctypes.c_double))
+    '''
+
+    setup_c_base_multi_cpu = c_base_setup + '''
+import multiprocessing
+pool = multiprocessing.Pool(processes={segment_count})
+'''
+
+    setup_c_doubles_multi_cpu_data = setup_c_doubles_data + setup_c_base_multi_cpu + '''
+multi_cpu_double_args = segment(aligned_mem_block_double, count={segment_count})
+    '''
+
+    setup_c_floats_data = c_base_setup + '''
+aligned_mem_block_float = numpy_allocate_aligned_shared_mem_block({shape}, 'float32', 32, init=diag_gen({test_size}))
+polygon_floats = aligned_mem_block_float.ctypes.data_as(ctypes.POINTER(ctypes.c_float))
+    '''
+
+    setup_c_floats_multi_cpu_data = setup_c_floats_data + setup_c_base_multi_cpu + '''
+multi_cpu_float_args = segment(aligned_mem_block_float, count={segment_count})
+    '''
+
+    polygon = diag_gen(test_size)
+    shape = (len(polygon), 2)
+    setup_py_data = setup_py_data.format(test_size=test_size)
+    setup_c_doubles_data = setup_c_doubles_data.format(test_size=test_size, shape=shape)
+    setup_c_doubles_multi_cpu_data = setup_c_doubles_multi_cpu_data.format(
+        test_size=test_size, segment_count=segment_count, shape=str(shape)
+    )
+    setup_c_floats_data = setup_c_floats_data.format(test_size=test_size, shape=shape)
+    setup_c_floats_multi_cpu_data = setup_c_floats_multi_cpu_data.format(
+        test_size=test_size, segment_count=segment_count, shape=str(shape)
     )
 
-    for info, timing, error in izip(impls, timings, errors):
-        print('{name}: {avg_time}s, {speedup_factor}x faster vs py_area, rel_err: {rel_err}%'.format(
-            name=info[0], avg_time=timing/repeat_cnt, speedup_factor=base_line_time/timing, rel_err=error*100
-        ))
+    python_impl_names = 'area', 'area_iter'
 
+    c_impl_multi_cpu = tuple(
+        imap('{0}_multi_cpu'.format, starmap(c_impl_poly_area_name, product(cord_type_names, supported_intrinsics)))
+    )
+
+    c_double_impl_names = [n for n in c_impl_names if 'double' in n]
+    c_float_impl_names = [n for n in c_impl_names if 'float' in n]
+
+    benchmark_suites = (
+        ('python', setup_py_data, tuple(izip(python_impl_names, repeat('polygon')))),
+
+        ('c_double_impls', setup_c_doubles_data,
+            tuple(izip(c_double_impl_names, repeat('polygon_doubles, {0}'.format(len(polygon)))))),
+
+        ('c_double_impls_multi_cpu', setup_c_doubles_multi_cpu_data,
+            tuple(izip((n + '_multi_cpu' for n in c_double_impl_names),
+                       repeat('multi_cpu_double_args, pool')))),
+
+        ('c_float_impls', setup_c_floats_data,
+            tuple(izip(c_float_impl_names, repeat('polygon_floats, {0}'.format(len(polygon)))))),
+
+        ('c_float_impls_multi_cpu', setup_c_floats_multi_cpu_data,
+            tuple(izip((n + '_multi_cpu' for n in c_float_impl_names),
+                       repeat('multi_cpu_float_args, pool'))))
+    )
+
+    base_line_result = area(diag_gen(test_size))
+    base_line_time = timeit.timeit('area(polygon)', setup=setup_py_data, number=repeat_cnt)
+
+    aligned_mem_block_float = numpy_allocate_aligned_shared_mem_block(shape, 'float32', 32, init=polygon)
+    polygon_floats = aligned_mem_block_float.ctypes.data_as(ctypes.POINTER(ctypes.c_float))
+    aligned_mem_block_double = numpy_allocate_aligned_shared_mem_block(shape, 'float64', 32, init=polygon)
+    polygon_doubles = aligned_mem_block_double.ctypes.data_as(ctypes.POINTER(ctypes.c_double))
+
+    multi_cpu_float_args = segment(aligned_mem_block_float)
+    multi_cpu_double_args = segment(aligned_mem_block_double)
+    for index in xrange(1, len(multi_cpu_float_args) - 1):
+        multi_cpu_float_args[index][1] += 2
+        multi_cpu_double_args[index][1] += 2
+
+    pool = multiprocessing.Pool(processes=segment_count)
+
+    for suite_name, setup, impls in benchmark_suites:
+        for func_name, args_str in impls:
+            stmnt = '{0}({1})'.format(func_name, args_str)
+            rel_error = abs((base_line_result - eval(stmnt))/base_line_result)
+            timing = timeit.timeit(stmnt, setup=setup, number=repeat_cnt)
+            print('{name}: {avg_time}s, {speedup_factor}x faster vs py_area, rel_err: {rel_err}%'.format(
+                name=func_name,
+                avg_time=timing/repeat_cnt,
+                speedup_factor=base_line_time/timing,
+                rel_err=rel_error * 100
+            ))
+
+
+    # t = timeit.Timer("print 'main statement'", "print 'setup'")
+
+    # repeat_cnt = 10
+    # impls = \
+    #     ('area', 'polygon'),        \
+    #     ('area_iter', 'polygon'),   \
+    #     ('poly_area_so.' + c_impl_poly_area_name('double'), 'polygon_doubles, len(polygon)'),           \
+    #     ('poly_area_so.' + c_impl_poly_area_name('float'), 'polygon_floats, len(polygon)'),             \
+    #     ('poly_area_so.' + c_impl_poly_area_name('double', 'sse'), 'polygon_doubles, len(polygon)'),    \
+    #     ('poly_area_so.' + c_impl_poly_area_name('float', 'sse'), 'polygon_floats, len(polygon)')
+    #
+    # if avx_supported():
+    #     impls += (
+    #         ('poly_area_so.' + c_impl_poly_area_name('float', 'avx'), 'polygon_floats, len(polygon)'),
+    #         ('poly_area_so.' + c_impl_poly_area_name('double', 'avx'), 'polygon_doubles, len(polygon)')
+    #     )
+    #
+    # base_line_result = area(polygon)
+    # base_line_time = timeit.timeit('area(polygon)', setup=setup, number=repeat_cnt)
+    # errors = (abs((base_line_result - eval(expr))/base_line_result) for expr in starmap('{0}({1})'.format, impls))
+    # timings = imap(
+    #     timeit.timeit,
+    #     starmap('{0}({1})'.format, impls),
+    #     repeat(setup),
+    #     repeat(timeit.default_timer),
+    #     repeat(repeat_cnt)
+    # )
+    #
+    # for info, timing, error in izip(impls, timings, errors):
+    #     print('{name}: {avg_time}s, {speedup_factor}x faster vs py_area, rel_err: {rel_err}%'.format(
+    #         name=info[0], avg_time=timing/repeat_cnt, speedup_factor=base_line_time/timing, rel_err=error*100
+    #     ))
+
+if __name__ == '__main__':
+    run_benchmarks()
 
 
 

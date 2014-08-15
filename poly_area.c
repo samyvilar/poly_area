@@ -66,7 +66,7 @@ extern void error_applying_unsupported_type();
         unsigned long index;                                                    \
         for (index = 0; index < (cords_len - 1); index++)                       \
             sum_of_diffs += _calc_diff_of_adj_prods(cords, index);              \
-        return scalar_half(scalar_abs(sum_of_diffs));                           \
+        return sum_of_diffs;/*return scalar_half(scalar_abs(sum_of_diffs));*/                           \
     }
 
 area_of_irregular_polygon_from_cords_tmpl(double, double)
@@ -107,7 +107,8 @@ float irreg_poly_area_sse_float(float cords[][2], unsigned long cords_len) {
     for (accum_sum_aux = _mm_cvtss_f32(accum_sum); index < (cords_len - 1); index++)
         accum_sum_aux += _calc_diff_of_adj_prods(cords, index);
 
-    return scalar_half(scalar_abs(accum_sum_aux));
+    return accum_sum_aux;
+//    return scalar_half(scalar_abs(accum_sum_aux));
 }
 
 double irreg_poly_area_sse_double(double cords[][2], unsigned long cords_len) {
@@ -135,7 +136,8 @@ double irreg_poly_area_sse_double(double cords[][2], unsigned long cords_len) {
     for (accum_sum_aux = _mm_cvtsd_f64(_mm_hadd_pd(accum_sum, accum_sum)); index < (cords_len - 1); index++)
         accum_sum_aux += _calc_diff_of_adj_prods(cords, index);
 
-    return scalar_half(scalar_abs(accum_sum_aux));
+    return accum_sum_aux;
+//    return scalar_half(scalar_abs(accum_sum_aux));
 }
 
 #define _mm256_flip_sign_ps(a) _mm256_xor_ps(a, _mm256_set1_ps(-0.0f))
@@ -193,7 +195,8 @@ float irreg_poly_area_avx_float(float cords[][2], unsigned long cords_len) {
     for (accum_sum_aux = _mm_cvtss_f32(_mm256_castps256_ps128(accum_sum)); index < (cords_len - 1); index++)
         accum_sum_aux += _calc_diff_of_adj_prods(cords, index);
 
-    return scalar_half(scalar_abs(accum_sum_aux));
+    return accum_sum_aux;
+//    return scalar_half(scalar_abs(accum_sum_aux));
 }
 
 
@@ -238,7 +241,8 @@ double irreg_poly_area_avx_double(double cords[][2], unsigned long cords_len) {
     for (accum_sum_aux = _mm_cvtsd_f64(_mm256_castpd256_pd128(accum_sum)); index < (cords_len - 1); index++)
         accum_sum_aux += _calc_diff_of_adj_prods(cords, index);
 
-    return scalar_half(scalar_abs(accum_sum_aux));
+    return accum_sum_aux;
+//    return scalar_half(scalar_abs(accum_sum_aux));
 }
 
 
