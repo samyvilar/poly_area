@@ -97,18 +97,18 @@ def conv_to_numpy(values, dtype):
     return numpy.asarray(values, dtype=dtype) if type(values) != numpy.ndarray or values.dtype != dtype else values
 
 
-def conv_to_numpy_aligned(values, dtype, alignment_bytes):
+def conv_to_numpy_aligned(values, dtype, alignment):
     if type(values) != numpy.ndarray or values.dtype != dtype or values.ctypes.data % alignment_bytes:
         values = numpy_allocate_aligned_shared_mem_block(
-            (len(values), 2), dtype, alignment_bytes=alignment_bytes, init=values
+            (len(values), 2), dtype, alignment_bytes=alignment, init=values
         )
     return values
 
 
-def py_func_wrapper_c(impl_func, memb_type, alignment=0):
+def py_func_wrapper_c(impl_func, memb_type, alignment=1):
     def py_func(points, memb_type=memb_type, alignment=alignment, impl_func=impl_func):
-        points = (alignment and conv_to_numpy or conv_to_numpy)(points, memb_type)
-        return impl_func(points.ravel().ctypes.data_as(impl_func.argtypes[0]), len(points))
+        points = conv_to_numpy_aligned(points, memb_type, alignment=alignment)
+        return abs(sum(impl_func(points.ravel().ctypes.data_as(impl_func.argtypes[0]), len(points))))/2
     return py_func
 
 
