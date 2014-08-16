@@ -86,14 +86,11 @@ def numpy_allocate_aligned_shared_mem_block(
     return values
 
 
-prefix_name, cord_type_names, intrinsic_names = 'irreg_poly_area', {'float', 'double'}, {'', 'sse', 'avx'}
+prefix_name, cord_type_names, intrinsic_names = 'irreg_poly_area', ('float', 'double'), ('', 'sse', 'avx')
 
 
 def c_impl_poly_area_name(memb_type_name, intrs_name='', prefix_name=prefix_name):
     return prefix_name + '_' + (intrs_name + (intrs_name and '_')) + memb_type_name
-
-
-c_impl_names = tuple(starmap(c_impl_poly_area_name, product(cord_type_names, intrinsic_names)))
 
 
 def conv_to_numpy(values, dtype):
@@ -113,6 +110,30 @@ def py_func_wrapper_c(impl_func, memb_type, alignment=0):
         points = (alignment and conv_to_numpy or conv_to_numpy)(points, memb_type)
         return impl_func(points.ravel().ctypes.data_as(impl_func.argtypes[0]), len(points))
     return py_func
+
+
+def mac_avx_supported():
+    return ' AVX1.0 ' in subprocess.check_output(('sysctl', '-a', 'machdep.cpu.features'))
+
+
+def linux_avx_supported():
+    return ' avx ' in subprocess.check_output(('cat', '/proc/cpuinfo'))
+
+
+def win_avx_supported():
+    raise NotImplementedError
+
+
+default_impls = {'Darwin': mac_avx_supported, 'Linux': linux_avx_supported, 'Windows': win_avx_supported}
+
+
+def avx_supported(impls=default_impls):
+    return impls[platform.system()]()
+
+
+supported_intrinsics = ('', 'sse', 'avx' * avx_supported())
+c_impl_names = tuple(starmap(c_impl_poly_area_name, product(cord_type_names, supported_intrinsics)))
+
 
 try:
     poly_area_so = ctypes.CDLL('libpoly_area.so')
@@ -139,27 +160,6 @@ try:
 except OSError as _:
     logging.warning('Failed to load shared object msg: {0}'.format(_))
 
-
-def mac_avx_supported():
-    return ' AVX1.0 ' in subprocess.check_output(('sysctl', '-a', 'machdep.cpu.features'))
-
-
-def linux_avx_supported():
-    return ' avx ' in subprocess.check_output(('cat', '/proc/cpuinfo'))
-
-
-def win_avx_supported():
-    raise NotImplementedError
-
-
-default_impls = {'Darwin': mac_avx_supported, 'Linux': linux_avx_supported, 'Windows': win_avx_supported}
-
-
-def avx_supported(impls=default_impls):
-    return impls[platform.system()]()
-
-
-supported_intrinsics = {'', 'sse', 'avx' * avx_supported()}
 
 
 def segment(values, count=cpu_count(), alignment=32):
@@ -262,16 +262,16 @@ multi_cpu_float_args = segment(aligned_mem_block_float, count={segment_count})
         ('c_double_impls', setup_c_doubles_data,
             tuple(izip(c_double_impl_names, repeat('polygon_doubles, {0}'.format(len(polygon)))))),
 
-        ('c_double_impls_multi_cpu', setup_c_doubles_multi_cpu_data,
-            tuple(izip((n + '_multi_cpu' for n in c_double_impl_names),
-                       repeat('multi_cpu_double_args, pool')))),
-
         ('c_float_impls', setup_c_floats_data,
             tuple(izip(c_float_impl_names, repeat('polygon_floats, {0}'.format(len(polygon)))))),
 
-        ('c_float_impls_multi_cpu', setup_c_floats_multi_cpu_data,
-            tuple(izip((n + '_multi_cpu' for n in c_float_impl_names),
-                       repeat('multi_cpu_float_args, pool'))))
+        # ('c_double_impls_multi_cpu', setup_c_doubles_multi_cpu_data,
+        #     tuple(izip((n + '_multi_cpu' for n in c_double_impl_names),
+        #                repeat('multi_cpu_double_args, pool')))),
+        #
+        # ('c_float_impls_multi_cpu', setup_c_floats_multi_cpu_data,
+        #     tuple(izip((n + '_multi_cpu' for n in c_float_impl_names),
+        #                repeat('multi_cpu_float_args, pool'))))
     )
 
     base_line_result = area(diag_gen(test_size))
@@ -301,40 +301,6 @@ multi_cpu_float_args = segment(aligned_mem_block_float, count={segment_count})
                 speedup_factor=base_line_time/timing,
                 rel_err=rel_error * 100
             ))
-
-
-    # t = timeit.Timer("print 'main statement'", "print 'setup'")
-
-    # repeat_cnt = 10
-    # impls = \
-    #     ('area', 'polygon'),        \
-    #     ('area_iter', 'polygon'),   \
-    #     ('poly_area_so.' + c_impl_poly_area_name('double'), 'polygon_doubles, len(polygon)'),           \
-    #     ('poly_area_so.' + c_impl_poly_area_name('float'), 'polygon_floats, len(polygon)'),             \
-    #     ('poly_area_so.' + c_impl_poly_area_name('double', 'sse'), 'polygon_doubles, len(polygon)'),    \
-    #     ('poly_area_so.' + c_impl_poly_area_name('float', 'sse'), 'polygon_floats, len(polygon)')
-    #
-    # if avx_supported():
-    #     impls += (
-    #         ('poly_area_so.' + c_impl_poly_area_name('float', 'avx'), 'polygon_floats, len(polygon)'),
-    #         ('poly_area_so.' + c_impl_poly_area_name('double', 'avx'), 'polygon_doubles, len(polygon)')
-    #     )
-    #
-    # base_line_result = area(polygon)
-    # base_line_time = timeit.timeit('area(polygon)', setup=setup, number=repeat_cnt)
-    # errors = (abs((base_line_result - eval(expr))/base_line_result) for expr in starmap('{0}({1})'.format, impls))
-    # timings = imap(
-    #     timeit.timeit,
-    #     starmap('{0}({1})'.format, impls),
-    #     repeat(setup),
-    #     repeat(timeit.default_timer),
-    #     repeat(repeat_cnt)
-    # )
-    #
-    # for info, timing, error in izip(impls, timings, errors):
-    #     print('{name}: {avg_time}s, {speedup_factor}x faster vs py_area, rel_err: {rel_err}%'.format(
-    #         name=info[0], avg_time=timing/repeat_cnt, speedup_factor=base_line_time/timing, rel_err=error*100
-    #     ))
 
 if __name__ == '__main__':
     run_benchmarks()
