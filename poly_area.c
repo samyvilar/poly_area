@@ -60,8 +60,8 @@ extern void error_applying_unsupported_type();
         member_type cords[][2],                                                 \
         unsigned long cords_len                                                 \
     ) {                                                                         \
-        /*if (__builtin_expect(is_null(cords) || cords_len == 0, 0))              \
-            return 0;*/                                                           \
+        if (__builtin_expect(is_null(cords) || cords_len == 0, 0))              \
+            return 0;                                                           \
         member_type sum_of_diffs = 0;                                           \
         unsigned long index;                                                    \
         for (index = 0; index < (cords_len - 1); index++)                       \
@@ -77,8 +77,8 @@ area_of_irregular_polygon_from_cords_tmpl(float, float)
 
 
 float irreg_poly_area_sse_float(float cords[][2], unsigned long cords_len) {
-//    if (__builtin_expect(is_null(cords) || cords_len == 0, 0))
-//        return 0;
+    if (__builtin_expect(is_null(cords) || cords_len == 0, 0))
+        return 0;
 
     __m128
         curr,
@@ -141,10 +141,10 @@ double irreg_poly_area_sse_double(double cords[][2], unsigned long cords_len) {
 }
 
 #define _mm256_flip_sign_ps(a) _mm256_xor_ps(a, _mm256_set1_ps(-0.0f))
-#if 1// ndef __AVX__
+#ifdef __AVX__
 float irreg_poly_area_avx_float(float cords[][2], unsigned long cords_len) {
-//    if (__builtin_expect(is_null(cords) || cords_len == 0, 0))
-//        return 0;
+    if (__builtin_expect(is_null(cords) || cords_len == 0, 0))
+        return 0;
 
     __m256
         values_0_3,
@@ -201,8 +201,8 @@ float irreg_poly_area_avx_float(float cords[][2], unsigned long cords_len) {
 
 
 double irreg_poly_area_avx_double(double cords[][2], unsigned long cords_len) {
-//    if (__builtin_expect(is_null(cords) || cords_len == 0, 0))
-//        return 0;
+    if (__builtin_expect(is_null(cords) || cords_len == 0, 0))
+        return 0;
 
     __m256d
         curr,
