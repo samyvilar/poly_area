@@ -1,6 +1,6 @@
 # Prints timing for calculating the area of an irregular polygon using multiple approachs,
 # for demonstation purposes.
 # requires python and gcc, supports, OS X and Linux, SSE and (AVX if cpu supports it)
-
+ 
 make  # Build C shared library ...
 make timings # Run benchmark suites ...
