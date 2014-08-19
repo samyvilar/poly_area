@@ -5,16 +5,28 @@ import logging
 import ctypes
 import sys
 
-from itertools import starmap, product, izip, repeat, ifilter
+from itertools import starmap, product, izip, repeat, ifilter, imap, chain
 from hardware_supp import supported_intrinsics
-from shared_mem import numpy_allocate_aligned_shared_mem_block, segment
+from shared_mem import allocate_aligned_shared_mem_c_array, segment, ctype
 
 current_module = sys.modules[__name__]
 prefix_name, cord_type_names = 'irreg_poly_area', ('float', 'double')
 
 
-def c_impl_poly_area_name(memb_type_name, intrs_name='', prefix_name=prefix_name):
-    return prefix_name + '_' + (intrs_name + (intrs_name and '_')) + memb_type_name
+def c_impl_ret_type(cord_type):
+    return ctype(cord_type)
+
+
+def c_impl_arg_types(cord_type):
+    return [ctypes.POINTER(ctype(cord_type)), ctypes.c_ulong]
+
+
+def set_c_impl_props(c_impl, cord_type):
+    c_impl.restype, c_impl.argtypes = c_impl_ret_type(cord_type), c_impl_arg_types(cord_type)
+
+
+def c_impl_poly_area_name(memb_type_name, intrs_name='', multi_cpu=False, prefix_name=prefix_name):
+    return '_'.join(ifilter(None, (prefix_name, intrs_name, memb_type_name, 'thrd' * multi_cpu)))
 
 
 def c_func_wrapper(c_impl):
@@ -24,14 +36,9 @@ def c_func_wrapper(c_impl):
 
 
 def py_func_wrapper_c(impl_func, memb_type, alignment=1):
-    def py_func(py_cords, memb_type=memb_type, alignment=alignment, c_func=c_func_wrapper(impl_func)):
-        points = numpy_allocate_aligned_shared_mem_block(
-            (len(py_cords), 2),
-            memb_type,
-            alignment=alignment,
-            init=py_cords
-        )
-        return c_func(points.ctypes.data_as(impl_func.argtypes[0]), len(points))
+    def py_func(py_cords, memb_type=memb_type, alignment=alignment, impl_func=impl_func, c_func=c_func_wrapper(impl_func)):
+        points = allocate_aligned_shared_mem_c_array((len(py_cords), 2), memb_type, alignment=alignment, init=py_cords)
+        return c_func(points.ctypes.data_as(impl_func.argtypes[0]), len(py_cords))
     return py_func
 
 
@@ -39,15 +46,15 @@ c_impl_names = []
 py_to_c_impl_names = []
 
 try:
-    poly_area_so = ctypes.CDLL('libpoly_area.so')
+    poly_area_so = ctypes.CDLL('c/libpoly_area.so')
 
     for _c_name in starmap(c_impl_poly_area_name, product(cord_type_names, supported_intrinsics)):
         try:
             c_impl_ref = getattr(poly_area_so, _c_name)
             c_intrs_type_name, c_cord_type_name = _c_name.split(prefix_name)[1].split('_')[-2:]
             c_cord_type = getattr(ctypes, 'c_' + c_cord_type_name)
-            c_impl_ref.restype, c_impl_ref.argtypes = c_cord_type, [ctypes.POINTER(c_cord_type), ctypes.c_ulong]
-            py_to_c_name = 'area_' + (c_intrs_type_name + (c_intrs_type_name and '_')) + c_cord_type_name + '_c'
+            set_c_impl_props(c_impl_ref, c_cord_type)
+            py_to_c_name = '_'.join(filter(None, ('area', c_intrs_type_name, c_cord_type_name, 'c')))
             setattr(
                 current_module,
                 py_to_c_name,
@@ -65,7 +72,6 @@ except OSError as _:
 
 multi_cpu_from_segments_impl_names = []
 py_to_multi_cpu_from_impl_names = []
-# default_pool = multiprocessing.Pool()
 
 
 def apply_irreg_poly_area_from_ptrs(args):
@@ -80,30 +86,21 @@ for cords_type, intrinsic_type in ifilter(
     product(cord_type_names, supported_intrinsics)
 ):
     _c_name = c_impl_poly_area_name(cords_type, intrinsic_type)
+    _c_type = getattr(ctypes, 'c_' + cords_type)
 
     def c_multi_cpu_func_from_ptrs(segment_address_and_lens, pool=None, c_name=_c_name):
-        # return sum(map(apply_irreg_poly_area_from_addrs, izip(repeat(c_impl), segment_address_and_lens)))
         return abs(sum((pool or multiprocessing.Pool()).map(
-            apply_irreg_poly_area_from_ptrs,
-            izip(repeat(c_name), segment_address_and_lens)))
-        )/2
+            apply_irreg_poly_area_from_ptrs, izip(repeat(c_name), segment_address_and_lens)
+        )))/2
 
-    def py_to_c_multi_cpu_func(
-            cords, cords_type=cords_type, c_multi_cpu_func=c_multi_cpu_func_from_ptrs
-    ):
-        values_at_shared_mem = numpy_allocate_aligned_shared_mem_block(
-            (len(cords), 2),
-            dtype={'float': 'float32', 'double': 'float64'}[cords_type],
-            alignment=32,
-            init=cords
-        )
+    def py_to_c_multi_cpu_func(cords, _c_type=_c_type, c_multi_cpu_func=c_multi_cpu_func_from_ptrs):
+        values_at_shared_mem = allocate_aligned_shared_mem_c_array((len(cords), 2), _c_type, alignment=32, init=cords)
         segments = segment(values_at_shared_mem)
         for i in xrange(len(segments) - 1):  # we need to increase the segment len by 1 for all but the very last segmnt
             segments[i][1] += 1              # when broadcasting since each impl, ignores the very last element
         return c_multi_cpu_func(segments)
 
     py_func_from_ptrs_name = c_impl_poly_area_name(cords_type, intrinsic_type) + '_multi_cpu_from_ptrs'
-
     py_func_name = c_impl_poly_area_name(cords_type, intrinsic_type) + '_multi_cpu'
 
     multi_cpu_from_segments_impl_names.append(py_func_from_ptrs_name)
@@ -111,6 +108,25 @@ for cords_type, intrinsic_type in ifilter(
 
     setattr(current_module, py_func_from_ptrs_name, c_multi_cpu_func_from_ptrs)
     setattr(current_module, py_func_name, py_to_c_multi_cpu_func)
+
+
+for c_cord_type_name, c_intrs_type_name in product(cord_type_names, supported_intrinsics):
+    _c_thrd_impl_name = c_impl_poly_area_name(c_cord_type_name, c_intrs_type_name, True)
+    if not hasattr(poly_area_so, _c_thrd_impl_name):
+        continue
+    _c_impl_ref = getattr(poly_area_so, _c_thrd_impl_name)
+    _c_cord_type = getattr(ctypes, 'c_' + c_cord_type_name)
+    set_c_impl_props(_c_impl_ref, _c_cord_type)
+    setattr(current_module, _c_thrd_impl_name, c_func_wrapper(_c_impl_ref))
+    c_impl_names.append(_c_thrd_impl_name)
+
+    py_to_c_name = c_impl_poly_area_name(c_cord_type_name, c_intrs_type_name, True) + '_py'
+    setattr(
+        current_module,
+        py_to_c_name,
+        py_func_wrapper_c(_c_impl_ref, _c_cord_type, alignment=32 * bool(c_intrs_type_name))
+    )
+    py_to_c_impl_names.append(py_to_c_name)
 
 
 

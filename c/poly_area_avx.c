@@ -1,148 +1,12 @@
-#include <limits.h>
-#include <stdlib.h>
-#include <stdio.h>
+#include "poly_area.h"
+
 #include <immintrin.h>
-#include <string.h>
 
-#define is_null(v) (v == NULL)
-#define bit_size(expr) (sizeof(expr) * CHAR_BIT)
-#define re_interp(expr, from_type, to_type) (((union {from_type _; to_type interp_expr;}){(expr)}).interp_expr)
-
-
-// twos complement to get abs(signed integral expr) a < 0 ==> ~a + 1, a >= 0 ==> a, (a ^ (a >> 32)) - (a >> 32)
-//#define twos_complement(sint_expr) (sint_expr ^ (bit_size(sint_expr) - 1)) - ((sint_expr) >> (bit_size(sint_expr) - 1))
-
-// to get the absolute value of a float all we need to do is set the significant bit to 0
-#define flt_abs(x, flt_type, intgl_type) re_interp(\
-    re_interp(x, flt_type, intgl_type) & ~(((intgl_type)1 << (bit_size(flt_type) - 1))),\
-    intgl_type,     \
-    flt_type        \
-)
-#define double_abs(x)   flt_abs(x, double, unsigned long)
-#define float_abs(x)    flt_abs(x, float, unsigned)
-//#define sint_abs twos_complement
-//#define uint_abs(x) (x)
-
-#define type_eq __builtin_types_compatible_p
-#define select_expr __builtin_choose_expr
-
-extern void error_applying_unsupported_type();
-
-#define scalar_abs(expr) ({                                         \
-    typedef typeof(expr) __expr_t_abs_;                             \
-    select_expr(type_eq(__expr_t_abs_, double), double_abs(expr),   \
-    select_expr(type_eq(__expr_t_abs_, float), float_abs(expr),     \
-        error_applying_unsupported_type())); })
-
-// we can a divide a float by 2, assuming it is sufficiently large, by subtracting 1 from its exponent ....
-#define DOUBLE_INDEX_OF_EXPONENT 52
-#define FLOAT_INDEX_OF_EXPONENT 23
-#define double_half(expr) re_interp((re_interp(expr, double, long long) - (1LLU << DOUBLE_INDEX_OF_EXPONENT)), long long, double)
-#define float_half(expr)  re_interp((re_interp(expr, float, int) - (1 << FLOAT_INDEX_OF_EXPONENT)), int, float)
-//#define integral_half(expr) ((expr) >> 1)
-
-#define scalar_half(expr)                                           \
-    select_expr(type_eq(typeof(expr), double), double_half(expr),   \
-    select_expr(type_eq(typeof(expr), float), float_half(expr),     \
-        error_applying_unsupported_type()))
-
-
-#define cord_x(v) ((v)[0])
-#define cord_y(v) ((v)[1])
-
-#define _calc_diff_of_adj_prods(cords, index) \
-    ((cord_x(cords[index]) * cord_y(cords[(index) + 1])) - (cord_y(cords[index]) * cord_x(cords[(index) + 1])))
-
-
-// calculate area of an irregular polygon using its flatten array of its coordinates ...
-#define area_of_irregular_polygon_from_cords_tmpl(member_type, prefix_name)     \
-    member_type irreg_poly_area_ ## prefix_name(                                \
-        member_type cords[][2],                                                 \
-        unsigned long cords_len                                                 \
-    ) {                                                                         \
-        if (__builtin_expect(is_null(cords) || cords_len == 0, 0))              \
-            return 0;                                                           \
-        member_type sum_of_diffs = 0;                                           \
-        unsigned long index;                                                    \
-        for (index = 0; index < (cords_len - 1); index++)                       \
-            sum_of_diffs += _calc_diff_of_adj_prods(cords, index);              \
-        return sum_of_diffs;/*return scalar_half(scalar_abs(sum_of_diffs));*/                           \
-    }
-
-area_of_irregular_polygon_from_cords_tmpl(double, double)
-
-area_of_irregular_polygon_from_cords_tmpl(float, float)
-
-#define _mm_abs_ps(v) _mm_andnot_ps(_mm_set1_ps(-0.0f), v)
-
-
-float irreg_poly_area_sse_float(float cords[][2], unsigned long cords_len) {
-    if (__builtin_expect(is_null(cords) || cords_len == 0, 0))
-        return 0;
-
-    __m128
-        curr,
-        next,
-        end = _mm_load_ps((const float *)&cords[0]),
-        accum_sum = _mm_setzero_ps();
-    float accum_sum_aux;
-
-    unsigned long index;
-    for (index = 0; index < (cords_len - 4); index += 4) { // @@ this will fail if cords_len < 4!
-        curr = end;
-        next = _mm_load_ps((const float *)&cords[index + 2]);
-        end = _mm_load_ps((const float *)&cords[index + 4]);
-
-        accum_sum = _mm_add_ps( // accumulate differences ...
-            accum_sum,
-            _mm_hsub_ps( // x0*y1 - y0*x1, x1*y2 - y1*x2, x2*y3 - y2*x3, x3*y4 - y3*x4
-                _mm_mul_ps(curr, _mm_shuffle_ps(curr, next, _MM_SHUFFLE(0, 1, 2, 3))), // x0*y1, y0*x1, x1*y2, y1*x2
-                _mm_mul_ps(next, _mm_shuffle_ps(next, end, _MM_SHUFFLE(0, 1, 2, 3))) // x2*y3, y2*x3, x3*y4, y3*x4
-            )
-        );
-    }
-
-    accum_sum = _mm_hadd_ps(accum_sum, accum_sum);
-    accum_sum = _mm_hadd_ps(accum_sum, accum_sum);
-    for (accum_sum_aux = _mm_cvtss_f32(accum_sum); index < (cords_len - 1); index++)
-        accum_sum_aux += _calc_diff_of_adj_prods(cords, index);
-
-    return accum_sum_aux;
-//    return scalar_half(scalar_abs(accum_sum_aux));
-}
-
-double irreg_poly_area_sse_double(double cords[][2], unsigned long cords_len) {
-//    if (__builtin_expect(is_null(cords) || cords_len == 0, 0))
-//        return 0;
-
-    __m128d curr, next, end = _mm_load_pd((const double *)&cords[0]), accum_sum = _mm_setzero_pd();
-    double accum_sum_aux;
-
-    unsigned long index;
-    for (index = 0; index < (cords_len - 2); index += 2) {
-        curr = end; // x0, y0
-        next = _mm_load_pd((const double *)&cords[index + 1]); // x1, y1
-        end = _mm_load_pd((const double *)&cords[index + 2]); // x2, y2
-
-        accum_sum = _mm_add_pd(
-            accum_sum,
-            _mm_hsub_pd( //y0*x1 - x0*y1, y1*x2 - x1*y2
-                _mm_mul_pd(curr, _mm_shuffle_pd(next, next, _MM_SHUFFLE2(0, 1))), // x0*y1, y0*x1
-                _mm_mul_pd(next, _mm_shuffle_pd(end, end, _MM_SHUFFLE2(0, 1))) // x1*y2, y1*x2
-            )
-        );
-    }
-
-    for (accum_sum_aux = _mm_cvtsd_f64(_mm_hadd_pd(accum_sum, accum_sum)); index < (cords_len - 1); index++)
-        accum_sum_aux += _calc_diff_of_adj_prods(cords, index);
-
-    return accum_sum_aux;
-//    return scalar_half(scalar_abs(accum_sum_aux));
-}
 
 #define _mm256_flip_sign_ps(a) _mm256_xor_ps(a, _mm256_set1_ps(-0.0f))
+
 #ifdef __AVX__
-float irreg_poly_area_avx_float(float cords[][2], unsigned long cords_len) {
+irreg_poly_area_func_sign(float, _avx) {
     if (__builtin_expect(is_null(cords) || cords_len == 0, 0))
         return 0;
 
@@ -200,7 +64,7 @@ float irreg_poly_area_avx_float(float cords[][2], unsigned long cords_len) {
 }
 
 
-double irreg_poly_area_avx_double(double cords[][2], unsigned long cords_len) {
+irreg_poly_area_func_sign(double, _avx) {
     if (__builtin_expect(is_null(cords) || cords_len == 0, 0))
         return 0;
 
@@ -258,9 +122,3 @@ double irreg_poly_area_avx_double(double cords[][2], unsigned long cords_len) {
 //    return 0;
 //}
 #endif
-
-
-
-
-
-

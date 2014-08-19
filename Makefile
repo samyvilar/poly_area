@@ -1,18 +1,15 @@
 
-CC=gcc
-CFLAGS=-Wall -Wfatal-errors -fPIC
-ifeq ($(CC),icc)
-CFLAGS+=-dynamiclib -O2
-else
-CFLAGS+=-mtune=native -march=native -shared -O2
-endif
+build: 
+	$(MAKE) -C c
+
+clean: 
+	rm *.pyc 
+	$(MAKE) -C c clean
 
 
+timings:
+	./benchmark.py
 
 
-build:
-		$(CC) $(CFLAGS) poly_area.c -o libpoly_area.so
-
-
-clean:
-		rm -f *.o *.so *.pyc
+test:
+	nosetests

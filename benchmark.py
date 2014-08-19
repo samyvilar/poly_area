@@ -1,6 +1,7 @@
 #!/usr/bin/env python
 __author__ = 'samyvilar'
 
+import sys
 import timeit
 import ctypes
 
@@ -24,7 +25,6 @@ polygon = diag_gen({test_size})
     '''
 
     c_base_setup = '''
-import numpy
 import ctypes
 import poly_area
 import c_poly_area
@@ -35,7 +35,7 @@ diag_gen = poly_area.diag_gen
     '''.format(','.join(c_poly_area.multi_cpu_from_segments_impl_names), ','.join(c_poly_area.c_impl_names))
 
     setup_c_doubles_data = c_base_setup + '''
-aligned_mem_block_double = shared_mem.numpy_allocate_aligned_shared_mem_block(
+aligned_mem_block_double = shared_mem.allocate_aligned_shared_mem_c_array(
     {shape}, 'float64', 32, init=diag_gen({test_size})
 )
 polygon_doubles = aligned_mem_block_double.ctypes.data_as(ctypes.POINTER(ctypes.c_double))
@@ -51,7 +51,7 @@ multi_cpu_double_args = shared_mem.segment(aligned_mem_block_double, count={segm
 '''
 
     setup_c_floats_data = c_base_setup + '''
-aligned_mem_block_float = shared_mem.numpy_allocate_aligned_shared_mem_block(
+aligned_mem_block_float = shared_mem.allocate_aligned_shared_mem_c_array(
     {shape}, 'float32', 32, init=diag_gen({test_size})
 )
 polygon_floats = aligned_mem_block_float.ctypes.data_as(ctypes.POINTER(ctypes.c_float))
@@ -63,6 +63,7 @@ multi_cpu_float_args = shared_mem.segment(aligned_mem_block_float, count={segmen
 
     polygon = poly_area.diag_gen(test_size)
     shape = (len(polygon), 2)
+
     setup_py_data = setup_py_data.format(test_size=test_size)
     setup_c_doubles_data = setup_c_doubles_data.format(test_size=test_size, shape=shape)
     setup_c_doubles_multi_cpu_data = setup_c_doubles_multi_cpu_data.format(
@@ -97,15 +98,16 @@ multi_cpu_float_args = shared_mem.segment(aligned_mem_block_float, count={segmen
 
         ('c_float_impls_multi_cpu', setup_c_floats_multi_cpu_data,
             tuple(izip((n + '_multi_cpu_from_ptrs' for n in c_float_impl_names),
-                       repeat('multi_cpu_float_args, pool=pool'))))
+                       repeat('multi_cpu_float_args, pool=pool')))),
     )
 
     base_line_result = poly_area.area(poly_area.diag_gen(test_size))
     base_line_time = timeit.timeit('poly_area.area(polygon)', setup=setup_py_data, number=repeat_cnt)
 
-    aligned_mem_block_float = shared_mem.numpy_allocate_aligned_shared_mem_block(shape, 'float32', 32, init=polygon)
+    aligned_mem_block_float = shared_mem.allocate_aligned_shared_mem_c_array(shape, 'float32', 32, init=polygon)
     polygon_floats = aligned_mem_block_float.ctypes.data_as(ctypes.POINTER(ctypes.c_float))
-    aligned_mem_block_double = shared_mem.numpy_allocate_aligned_shared_mem_block(shape, 'float64', 32, init=polygon)
+
+    aligned_mem_block_double = shared_mem.allocate_aligned_shared_mem_c_array(shape, 'float64', 32, init=polygon)
     polygon_doubles = aligned_mem_block_double.ctypes.data_as(ctypes.POINTER(ctypes.c_double))
 
     multi_cpu_float_args = shared_mem.segment(aligned_mem_block_float)
@@ -117,16 +119,19 @@ multi_cpu_float_args = shared_mem.segment(aligned_mem_block_float, count={segmen
     pool = multiprocessing.Pool(processes=segment_count)
 
     for suite_name, setup, impls in benchmark_suites:
+        print(suite_name + ':')
         for func_name, args_str in impls:
-            stmnt = '{0}({1})'.format(func_name, args_str)
-            rel_error = abs((base_line_result - eval(stmnt))/base_line_result)
-            timing = timeit.timeit(stmnt, setup=setup, number=repeat_cnt)
-            print('{name}: {avg_time}s, {speedup_factor}x faster vs py_area, rel_err: {rel_err}%'.format(
-                name=func_name,
-                avg_time=timing/repeat_cnt,
-                speedup_factor=base_line_time/timing,
-                rel_err=rel_error * 100
-            ))
+            module_name, func_name = func_name.split('.')
+            stmnt = '{0}.{1}({2})'.format(module_name, func_name, args_str)
+            if hasattr(sys.modules[module_name], func_name):
+                rel_error = abs((base_line_result - eval(stmnt))/base_line_result)
+                timing = timeit.timeit(stmnt, setup=setup, number=repeat_cnt)
+                print('{name}: {avg_time}s, {speedup_factor}x faster vs py_area, rel_err: {rel_err}%'.format(
+                    name=func_name,
+                    avg_time=timing/repeat_cnt,
+                    speedup_factor=base_line_time/timing,
+                    rel_err=rel_error * 100
+                ))
 
 if __name__ == '__main__':
     run_suites()
